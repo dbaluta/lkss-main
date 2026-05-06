@@ -18,10 +18,6 @@ exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 
 numfig = True
 
-extensions = [
-	'sphinx_copybutton'
-]
-
 # same formatting you'd see in LATEX
 numfig_format = {
 	'figure': 'Figure %s',
