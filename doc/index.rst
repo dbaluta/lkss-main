@@ -70,3 +70,7 @@ students to try to fix the issues themselves by submitting a pull request.
 
    2026/about
    2026/day1
+   2026/day2
+   2026/day3
+   2026/day4
+   2026/imx93-frdm-ext2-header
