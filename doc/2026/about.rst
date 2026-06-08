@@ -43,7 +43,7 @@ Schedule
      - Daniel Baluta
 
    * - 02.07.2026, 16:30 - 20:00
-     - TODO
+     - :ref:`i2c-bus-and-the-bmp280-sensor-driver`
      - Iuliana Prodan
 
    * - 03.07.2026, 10:00 - 16:00
