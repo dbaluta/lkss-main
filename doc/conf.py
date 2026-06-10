@@ -45,3 +45,6 @@ html_css_files = ['css/custom.css']
 html_show_sphinx = False
 
 html_logo = '_static/LOGO.svg'
+
+manpages_url = 'https://man7.org/linux/man-pages/man{section}/{page}.{section}.html'
+
