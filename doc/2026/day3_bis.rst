@@ -7,12 +7,12 @@ Day 3 (alternate) – SPI from Scratch: Driving the ST7789 Display
 **Topics**
 
 - SPI bus fundamentals: signals, clock polarity/phase (CPOL/CPHA), chip-select, SPI modes
-- SPI buses on the i.MX93 FRDM board: LPSPI controllers, EXT2 connector
-- ST7789 TFT controller: architecture, pin description, command/data protocol
-- ST7789 initialization sequence and essential commands
-- Writing a minimal SPI driver from scratch: probe, write_cmd, write_data, reset, init
-- Drawing primitives: fill, fill_rect, draw_pixel, draw_line, draw_circle
-- Device tree for LPSPI3 and the ST7789 child node
+- SPI buses on the i.MX93 FRDM board: LPSPI3 controller, EXT2 connector
+- ST7789 TFT controller: architecture, 4-line SPI protocol, command/data distinction
+- RGB565 pixel format: bit layout, byte order, framebuffer memory organisation
+- ST7789 initialization sequence and address window mechanism
+- Drawing primitives from scratch: fill, fill_rect, draw_pixel, draw_line, draw_circle, fill_circle
+- Userspace framebuffer interface via Linux miscdevice: mmap, ioctl, write
 
 **Goal**
 
@@ -21,9 +21,10 @@ By the end of this lab you will be able to:
 - Explain the SPI electrical protocol and identify the mode used by the ST7789
 - Describe how the ST7789 display controller works and how to talk to it over SPI
 - Wire the ST7789 display module to the i.MX93 FRDM EXT2 connector correctly
-- Write and build a complete SPI character driver that initializes the display
-- Implement graphical primitives (fill, rectangle, pixel, line, circle) from scratch
 - Write the device tree node that binds the driver to the hardware
+- Implement every drawing primitive (fill, rectangle, pixel, line, circle) from scratch
+- Expose a framebuffer to userspace via a Linux miscdevice (mmap + ioctl)
+- Write and run userspace demo applications that draw to the display
 
 ----
 
@@ -39,8 +40,8 @@ for connecting microcontrollers to low-speed peripherals: displays, ADCs, DACs,
 flash memories, sensors, and more.
 
 Unlike I2C, SPI does *not* use addressing on the bus.  Instead, each device gets
-its own **chip-select (CS#)** line.  The master asserts CS# low to select the
-target device, exchanges data, then de-asserts CS# high to release it.
+its own dedicated **chip-select (CS#)** line.  The master asserts CS# low to
+select the target device, exchanges data, then de-asserts CS# high to release it.
 
 SPI Signals
 ^^^^^^^^^^^
@@ -63,120 +64,96 @@ A standard SPI bus uses **four signals**:
    * - **MISO**
      - Slave → Master
      - Master In Slave Out.  Data sent *from* the slave *to* the master.
+       Not connected to the ST7789 (write-only display).
    * - **CS#** (CSx, NSS)
      - Master → Slave
-     - Chip Select, active-low.  One per device on the bus; selecting a device
-       de-asserts all others.
+     - Chip Select, active-low.  One per device on the bus.
 
-SPI is a **point-to-point** or **single-master multi-slave** bus.  Multiple
-devices may share SCLK, MOSI, and MISO, provided each has its own CS# line:
+Multiple devices may share SCLK, MOSI, and MISO, each with its own CS# line:
 
 .. code-block:: text
 
    Master
-   ┌──────────────────────────────────────────────────────────────┐
-   │  SCLK ──────────────────┬────────────────── SCLK            │
-   │  MOSI ──────────────────┼────────────────── MOSI            │
-   │  MISO ──────────────────┼────────────────── MISO            │
-   │  CS0# ──────────────────┘                                    │
-   │  CS1# ────────────────────────────────────── (device 2 CS)  │
-   └──────────────────────────────────────────────────────────────┘
-         Device 0 (e.g. ST7789)       Device 1 (e.g. flash)
+   ┌─────────────────────────────────────────────────────┐
+   │  SCLK ──────────────────┬─────────────────────────  │
+   │  MOSI ──────────────────┼─────────────────────────  │
+   │  MISO ──────────────────┼─────────────────────────  │
+   │  CS0# ──────────────────┘  (Device 0: ST7789)       │
+   │  CS1# ──────────────────────────────── (Device 1)   │
+   └─────────────────────────────────────────────────────┘
 
 SPI Modes: CPOL and CPHA
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The clock can be configured in four different ways depending on two parameters:
+The clock can be configured in four ways depending on two parameters:
 
-- **CPOL** (Clock Polarity): idle state of the clock line.
-
-  - CPOL=0 → clock idles **low**
-  - CPOL=1 → clock idles **high**
-
-- **CPHA** (Clock Phase): which clock edge is used to *sample* data.
-
-  - CPHA=0 → data is sampled on the **leading** (first) edge of each clock cycle
-  - CPHA=1 → data is sampled on the **trailing** (second) edge
-
-The four combinations give four **SPI modes**:
+- **CPOL** (Clock Polarity): idle state of the clock line (0=idle low, 1=idle high).
+- **CPHA** (Clock Phase): which clock edge is used to *sample* data (0=leading, 1=trailing).
 
 .. list-table::
    :header-rows: 1
-   :widths: 15 10 10 65
+   :widths: 12 10 10 68
 
    * - Mode
      - CPOL
      - CPHA
      - Description
-   * - Mode 0
+   * - **Mode 0**
      - 0
      - 0
-     - Clock idles low; sample on rising edge, shift on falling edge.
-       **Used by the ST7789 for write operations.**
+     - Clock idles low; data sampled on rising edge, shifted on falling edge.
+       **Used by the ST7789.**
    * - Mode 1
      - 0
      - 1
-     - Clock idles low; shift on rising edge, sample on falling edge.
+     - Clock idles low; shifted on rising, sampled on falling.
    * - Mode 2
      - 1
      - 0
-     - Clock idles high; sample on falling edge, shift on rising edge.
+     - Clock idles high; sampled on falling, shifted on rising.
    * - Mode 3
      - 1
      - 1
-     - Clock idles high; shift on falling edge, sample on rising edge.
+     - Clock idles high; shifted on falling, sampled on rising.
 
 .. note::
 
-   The ST7789 operates in **SPI Mode 0** (CPOL=0, CPHA=0) for write transactions.
-   We only write to the display in this lab (MISO is left unconnected), so Mode 0
-   is the only mode we need to configure.
+   The ST7789 operates in **SPI Mode 0** (CPOL=0, CPHA=0).  Since we only write
+   to the display (MISO is unconnected), this is the only mode we configure.
 
-SPI Bus Transaction Anatomy
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+SPI Transaction Anatomy
+^^^^^^^^^^^^^^^^^^^^^^^^
 
-A minimal SPI write transaction to a device looks like this:
+A minimal SPI write transaction for one byte looks like this:
 
 .. code-block:: text
 
-   CS# ──┐                                           ┌── (idle high)
-         └───────────────────────────────────────────┘
-   SCK   ─┬─┬─┬─┬─┬─┬─┬─┬──  (8 clock pulses)
-   MOSI  D7 D6 D5 D4 D3 D2 D1 D0   (MSB first by default)
+   CS# ──┐                                     ┌── (idle high)
+         └─────────────────────────────────────┘
+   SCK   ──┐─┐─┐─┐─┐─┐─┐─┐──   (8 clock pulses, Mode 0: idles low)
+             │ │ │ │ │ │ │ │
+   MOSI  D7  D6 D5 D4 D3 D2 D1 D0   (MSB first)
 
-1. Master drives CS# low  — device is now selected.
-2. Master clocks out bits on MOSI, one per clock cycle (MSB first by default).
-3. In full-duplex mode the slave simultaneously drives bits on MISO.
+1. Master drives CS# low — device selected.
+2. Master clocks out 8 bits on MOSI, MSB first, one bit per clock cycle.
+3. Slave samples each bit on the rising clock edge (Mode 0).
 4. Master drives CS# high — transaction complete.
 
 Part 2 – SPI on the i.MX93 FRDM Board
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The NXP i.MX93 SoC integrates several **LPSPI** (Low-Power SPI) controller
-instances.  LPSPI stands for *Low Power Serial Peripheral Interface* — an
-evolution of the classic Freescale/NXP SPI IP block with:
-
-- Programmable clock divider (up to ~60 MHz on i.MX93)
-- Hardware chip-select management (up to 4 CS per controller)
-- FIFO-based operation with DMA support
-- Support for all four SPI modes
-
-LPSPI Buses Exposed on the EXT2 Connector (J601)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Of the available LPSPI instances, **LPSPI3** is routed to the EXT2 expansion
-header (J601).  The following table shows which physical header pins carry the
-LPSPI3 signals:
+The NXP i.MX93 SoC integrates several **LPSPI** (Low-Power SPI) controllers.
+**LPSPI3** is routed to the EXT2 expansion header (J601):
 
 .. list-table::
    :header-rows: 1
-   :widths: 10 12 18 18 42
+   :widths: 12 12 18 18 40
 
    * - J601 Pin
      - Signal
      - SoC Pad
-     - GPIO line
-     - LPSPI3 function
+     - GPIO Line
+     - LPSPI3 Function
    * - 23
      - SCK
      - GPIO_IO11
@@ -191,25 +168,24 @@ LPSPI3 signals:
      - MISO
      - GPIO_IO09
      - GPIO2_IO09
-     - LPSPI3_SIN (master data input, **not connected** to ST7789)
+     - LPSPI3_SIN (not connected to ST7789)
    * - 24
      - CS0
      - GPIO_IO08
      - GPIO2_IO08
-     - LPSPI3_PCS0 (hardware chip-select 0)
+     - LPSPI3_PCS0 (hardware chip-select, not connected)
 
-In addition to the SPI signals above, two **free GPIO** lines are used to drive
-the ST7789-specific control signals (RST and D/C):
+Two additional GPIO lines drive the ST7789 control signals:
 
 .. list-table::
    :header-rows: 1
-   :widths: 10 12 18 18 42
+   :widths: 12 12 18 18 40
 
    * - J601 Pin
      - Signal
      - SoC Pad
-     - GPIO line
-     - Used for
+     - GPIO Line
+     - Used For
    * - 32
      - RST
      - GPIO_IO12
@@ -219,154 +195,150 @@ the ST7789-specific control signals (RST and D/C):
      - D/C
      - GPIO_IO04
      - GPIO2_IO04
-     - ST7789 data/command select (DCX), active-high=data
+     - ST7789 data/command select (DCX), HIGH=data
 
 .. note::
 
-   LPSPI3_CS0 (GPIO_IO08, pin 24) is **not connected** to the ST7789 display
-   module.  The display module's CS pin is tied to GND on the module PCB, so it
-   is always selected.  We must still enumerate a valid chip-select in the device
-   tree (``reg = <0>``); the SPI core will toggle PCS0 on each transaction but
-   the signal has no effect on the display.
+   The ST7789 module's CS pin is soldered to GND on the module PCB, so the display
+   is always selected.  LPSPI3_PCS0 (pin 24) is wired by the SPI core on each
+   transaction but has no electrical effect on the display.
 
 Part 3 – The ST7789 Display Controller
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Overview
-^^^^^^^^^
+^^^^^^^^
 
-The **ST7789VW** (Sitronix) is a single-chip TFT-LCD controller/driver with an
-on-chip frame memory (FM).  Key characteristics:
+The **ST7789VW** (Sitronix) is a single-chip TFT-LCD controller with on-chip
+frame memory.  Key characteristics:
 
-- Maximum display resolution: **240 (H) × 320 (V) RGB pixels**
-- On-chip frame buffer: 240 × 320 × 18 bits = 1,382,400 bits
-- Pixel formats: 12 bpp (RGB 4-4-4), **16 bpp (RGB 5-6-5)**, 18 bpp (RGB 6-6-6)
-- Multiple interfaces: parallel 8080, RGB, SPI (3-line and 4-line serial)
-- Integrated power supply (DC/DC converter, VCOM generation)
-- Operating supply: VDDI 1.65–3.3 V; VDD 2.4–3.3 V
-- Operating temperature: -30 °C to +85 °C
-
-In this lab we use the display as a 240×240 panel (the panel glass is physically
-cropped; the controller still addresses rows 0–239 and columns 0–239).
+- Maximum resolution: **240 (H) × 320 (V)** RGB pixels
+- On-chip frame buffer: 240 × 320 × 18 bits
+- Pixel formats: 12 bpp (RGB444), **16 bpp (RGB565)**, 18 bpp (RGB666)
+- 4-wire SPI interface (SCL, SDA, CS, DCX) — **no MISO needed for display use**
+- Operating supply: 3.3 V
+- The 240×240 module physically crops the 240×320 controller to 240 rows
 
 ST7789 Interface Pins (SPI 4-Line Mode)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-The breakout module typically exposes seven signals.  In 4-line SPI mode the
-relevant pins are:
 
 .. list-table::
    :header-rows: 1
    :widths: 12 12 76
 
-   * - Pin name
+   * - Pin Name
      - Direction
      - Description
    * - **VCC**
      - Power
-     - Analog supply voltage (2.4–3.3 V).  Connect to 3.3 V.
+     - Logic and analog supply 2.4–3.3 V.  Connect to 3.3 V only.
    * - **GND**
      - Power
      - Ground reference.
    * - **RESX** (RST)
      - Input
-     - Hardware reset, **active-low**.  Pull low ≥ 15 ms to reset the controller,
-       then release high.  The controller requires ≥ 120 ms after reset before
-       commands can be accepted.
+     - Hardware reset, **active-low**.  Pulse low ≥ 15 ms to reset.
    * - **CSX** (CS)
      - Input
-     - Chip select, **active-low**.  Often tied to GND on the module (always
-       selected).
-   * - **DCX** (D/C, RS)
+     - Chip select, active-low.  Tied to GND on the module.
+   * - **DCX** (D/C)
      - Input
-     - Data / Command select.  **LOW = command byte**, **HIGH = data byte**.
-       This extra signal is the defining feature of the 4-line SPI protocol.
+     - **LOW = command byte, HIGH = data/parameter byte.**
    * - **SDA** (MOSI)
      - Input
-     - Serial data input.  Data is clocked in on the rising edge of SCL (SPI
-       Mode 0).  Only used for write (MISO/SDO not needed for display-only use).
+     - Serial data, clocked on rising edge (SPI Mode 0).
    * - **SCL** (SCK)
      - Input
-     - Serial clock.  Maximum write clock: 80 MHz; we use 40 MHz for margin.
+     - Serial clock.  Max write clock 80 MHz; we use 40 MHz.
    * - **BLK** (LED+)
      - Input
-     - Backlight enable/control.  Connect to 3.3 V (always on) or drive with a
-       PWM GPIO for brightness control.
+     - Backlight control.  Connect to 3.3 V for always-on.
 
-4-Line SPI Protocol (Command vs. Data)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-The 4-line SPI mode uses the standard SPI bus (SCL, SDA, CS) **plus one extra
-signal**: DCX (D/C).  The DCX line distinguishes between a command byte and a
-data/parameter byte:
-
-.. code-block:: text
-
-   Transaction to send a command opcode followed by two data bytes:
-
-   CS# ───┐                                                      ┌──
-          └──────────────────────────────────────────────────────┘
-   DCX    ─┤LOW├───────────────┤HIGH├──────────────────────────────
-   SCL    ──┬┬┬┬┬┬┬┬──────────┬┬┬┬┬┬┬┬──────────┬┬┬┬┬┬┬┬────────
-   SDA    ──CMD_BYTE──────────DATA_BYTE_0─────────DATA_BYTE_1──────
-
-Sequence for every ST7789 operation:
-
-1. Assert CS# low (SPI core handles this automatically).
-2. Set DCX **low**.
-3. Clock the 8-bit command opcode over SDA (MOSI).
-4. Set DCX **high**.
-5. Clock 0 or more 8-bit parameter/data bytes.
-6. De-assert CS# high.
-
-This is implemented in the driver as two primitives: ``st7789_write_cmd()``
-and ``st7789_write_data()``.
-
-ST7789 Display RAM and Address Window
+4-Line SPI Protocol: Command vs. Data
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The ST7789 has an internal **Display Data RAM** (GRAM) organized as a
-column-by-row matrix.  To write pixels you must first set an **address window**
-(a rectangular region) using CASET and RASET, then stream pixel data with RAMWR.
-The controller auto-increments the write pointer across the window.
+The defining feature of the 4-line SPI protocol is the **DCX signal**, which
+tells the controller whether each incoming byte is a command opcode or a
+data parameter / pixel byte:
 
 .. code-block:: text
 
-   GRAM layout (240 x 240 view, RGB565):
+   Sending command 0x2A (CASET) followed by 4 data bytes:
 
-   (0,0)──────────────────────────── (239,0)
-     │                                   │
-     │   Set window with CASET/RASET     │
-     │   then write pixels with RAMWR   │
-     │                                   │
-   (0,239)────────────────────────(239,239)
+   CS#  ──┐                                                         ┌──
+          └─────────────────────────────────────────────────────────┘
+   DCX     LOW        │            HIGH                              │
+           ───────────┤────────────────────────────────────────────
+   SCL     ┌┐┌┐┌┐┌┐  │  ┌┐┌┐┌┐┌┐  ┌┐┌┐┌┐┌┐  ┌┐┌┐┌┐┌┐  ┌┐┌┐┌┐┌┐
+   SDA     ──0x2A──  │  ──0x00──  ──0x00──  ──0x00──  ──0xEF──
 
-Each pixel in RGB565 format occupies **2 bytes** on the SPI bus:
-- Byte 0 (MSB): R[4:0] | G[5:3]
-- Byte 1 (LSB): G[2:0] | B[4:0]
+   Byte 1: command opcode (DCX=LOW)
+   Bytes 2–5: data parameters (DCX=HIGH)
 
-Total bytes to fill the 240x240 panel: 240 × 240 × 2 = **115,200 bytes**.
+The sequence for every ST7789 operation:
 
-ST7789 Initialization and Reset Sequence
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1. Assert CS# low (SPI core handles automatically).
+2. Set DCX **low**.
+3. Clock the 8-bit command opcode over SDA.
+4. Set DCX **high**.
+5. Clock 0 or more 8-bit parameter/pixel data bytes.
+6. De-assert CS# high.
 
-Before the display shows anything, the controller must be initialized:
+ST7789 GRAM and Address Window
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-1. **Hardware reset**: pulse RESX low for ≥ 15 ms, then high.  Wait ≥ 120 ms.
-2. **SWRESET** (0x01): software reset.  Wait ≥ 150 ms.
-3. **SLPOUT** (0x11): exit sleep mode.  Wait ≥ 500 ms.
-4. **COLMOD** (0x3A) + 0x55: set pixel format to RGB565 (16 bpp).
-5. **MADCTL** (0x36) + 0x00: memory access control (normal orientation, RGB order).
-6. **INVON** (0x21): display inversion on (required by most ST7789 modules for
-   correct color rendering — the default factory setting is inverted).
-7. **NORON** (0x13): normal display mode on.
-8. **DISPON** (0x29): turn on the display output.  Wait ≥ 100 ms.
+The ST7789 has internal **Display Data RAM (GRAM)** organised as columns × rows.
+To write pixels you must first define an **address window** using CASET and RASET,
+then stream pixel data with RAMWR.  The controller auto-increments its write
+pointer across the window, row by row:
+
+.. code-block:: text
+
+   GRAM layout — 240×240 panel view:
+
+   col:  0                             239
+   row 0: ┌───────────────────────────────┐
+          │                               │
+          │   CASET sets column range     │
+          │   RASET sets row range        │
+          │   RAMWR opens pixel stream    │
+          │                               │
+   row 239:└───────────────────────────────┘
+
+   Address window example: CASET(0,239) RASET(0,239) = full screen
+
+ST7789 Initialization Sequence
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+After hardware reset the controller is in sleep mode.  The minimal sequence to
+bring it up is:
+
+1. **Hardware RESX pulse**: drive RESX low ≥ 15 ms, then high; wait ≥ 120 ms.
+2. **SLPOUT** (0x11): exit sleep mode.  Wait ≥ 500 ms.
+3. **COLMOD** (0x3A) + 0x55: set pixel format to RGB565 (16 bpp).
+4. **PORCTRL** (0xB2) + 5 bytes: porch settings (timing fine-tuning).
+5. **GCTRL** (0xB7) + 0x75: gate control.
+6. **VCOMS** (0xBB) + 0x22: VCOM voltage setting.
+7. **VDVVRHEN** (0xC2) + {0x01, 0xFF}: enable VDV/VRH.
+8. **VRHS** (0xC3) + 0x13: positive voltage reference.
+9. **VDVS** (0xC4) + 0x20: negative voltage reference.
+10. **VCMOFSET** (0xC5) + 0x20: VCOM offset.
+11. **PWCTRL1** (0xD0) + {0xA4, 0xA1}: power control.
+12. **DISPON** (0x29): turn on display output.  Wait ≥ 100 ms.
+13. **INVON** (0x21): display inversion on (required on most ST7789 modules).
+14. **MADCTL** (0x36) + 0x00: normal scan order, RGB color order.
+15. **PVGAMCTRL** (0xE0) + 14 bytes: positive gamma curve.
+16. **NVGAMCTRL** (0xE1) + 14 bytes: negative gamma curve.
+
+.. note::
+
+   Steps 4–11 and 15–16 (power/gamma tuning) can be omitted for a first bring-up.
+   The display will light up with steps 1–3 + 12–14.  The full sequence matches the
+   ``HSD20_IPS`` profile from ``drivers/staging/fbtft/fb_st7789v.c`` and produces
+   correct colors and contrast.
 
 Essential ST7789 Commands
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-The table below covers all commands used in this lab.  The full command reference
-is in the ST7789VW datasheet, Chapter 9.
 
 .. list-table::
    :header-rows: 1
@@ -376,30 +348,22 @@ is in the ST7789VW datasheet, Chapter 9.
      - Opcode
      - Params
      - Description
-   * - **NOP**
-     - 0x00
-     - 0
-     - No operation.  Used as a bus separator.
    * - **SWRESET**
      - 0x01
      - 0
-     - Software reset.  All registers return to default.  Wait ≥ 150 ms.
+     - Software reset; wait ≥ 150 ms.
    * - **SLPOUT**
      - 0x11
      - 0
-     - Exit sleep mode.  The DC/DC and oscillator start up.  Wait ≥ 500 ms.
-   * - **NORON**
-     - 0x13
-     - 0
-     - Normal display mode on (full frame, no partial).
+     - Exit sleep mode; wait ≥ 500 ms.
    * - **INVOFF**
      - 0x20
      - 0
-     - Display inversion off (normal pixel rendering).
+     - Display inversion off.
    * - **INVON**
      - 0x21
      - 0
-     - Display inversion on (required on most modules for correct colors).
+     - Display inversion on (required on most ST7789 modules).
    * - **DISPOFF**
      - 0x28
      - 0
@@ -407,89 +371,608 @@ is in the ST7789VW datasheet, Chapter 9.
    * - **DISPON**
      - 0x29
      - 0
-     - Display on.  Wait ≥ 100 ms after issuing.
+     - Display on; wait ≥ 100 ms after issuing.
    * - **CASET**
      - 0x2A
      - 4
-     - Column address set: XS_high, XS_low, XE_high, XE_low.
-       Sets the column (X) address window for RAMWR.
+     - Column address set: x0_H, x0_L, x1_H, x1_L (big-endian pairs).
    * - **RASET**
      - 0x2B
      - 4
-     - Row address set: YS_high, YS_low, YE_high, YE_low.
-       Sets the row (Y) address window for RAMWR.
+     - Row address set: y0_H, y0_L, y1_H, y1_L (big-endian pairs).
    * - **RAMWR**
      - 0x2C
      - N
-     - Memory write.  Subsequent bytes are pixel data filling the window
-       defined by the last CASET/RASET pair.
+     - Memory write: subsequent bytes are pixel data filling the window.
    * - **MADCTL**
      - 0x36
      - 1
-     - Memory Data Access Control.  Bit 3 (BGR): 0=RGB, 1=BGR.
-       Bits 6-7 control row/column swap and mirror for rotation.
+     - Memory access control: rotation, mirror, RGB/BGR order.
    * - **COLMOD**
      - 0x3A
      - 1
-     - Interface Pixel Format.  0x55 = RGB565 (16 bpp), 0x66 = RGB666 (18 bpp).
+     - Pixel format: 0x55 = RGB565 (16 bpp), 0x66 = RGB666 (18 bpp).
    * - **PORCTRL**
      - 0xB2
      - 5
-     - Porch setting (front/back porch and blank porch).  Used for fine
-       timing control; default values are acceptable for this lab.
+     - Porch control (front/back porch timing).
    * - **GCTRL**
      - 0xB7
      - 1
-     - Gate control.  Sets VGH/VGL switching speed.
+     - Gate control (VGH/VGL switching speed).
    * - **VCOMS**
      - 0xBB
      - 1
-     - VCOM setting.  Affects contrast/color balance.
-   * - **VDVVRHEN**
-     - 0xC2
-     - 1
-     - VDV and VRH command enable.
-   * - **VRHS**
-     - 0xC3
-     - 1
-     - VRH set.  Regulates the positive source voltage.
-   * - **VDVS**
-     - 0xC4
-     - 1
-     - VDV set.  Regulates the negative source voltage.
-   * - **FRCTRL2**
-     - 0xC6
-     - 1
-     - Frame Rate Control (normal mode).  0x0F = 60 Hz.
+     - VCOM voltage setting.
    * - **PWCTRL1**
      - 0xD0
      - 2
-     - Power Control 1.  Sets AVDD, AVCL, VDS levels.
+     - Power control 1 (AVDD, AVCL, VDS).
+   * - **PVGAMCTRL**
+     - 0xE0
+     - 14
+     - Positive voltage gamma control curve.
+   * - **NVGAMCTRL**
+     - 0xE1
+     - 14
+     - Negative voltage gamma control curve.
+
+Part 4 – RGB565 Pixel Format and the Framebuffer
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+RGB565 Bit Layout
+^^^^^^^^^^^^^^^^^^
+
+Each pixel is stored as a **16-bit word**.  The bits are packed as follows:
+
+.. code-block:: text
+
+   Bit:  15 14 13 12 11 | 10  9  8  7  6  5 |  4  3  2  1  0
+         ───────────────────────────────────────────────────────
+         R4 R3 R2 R1 R0 | G5 G4 G3 G2 G1 G0 | B4 B3 B2 B1 B0
+         └──── Red ─────┘└──────── Green ────┘└──── Blue ─────┘
+            5 bits            6 bits              5 bits
+
+   Total: 5 + 6 + 5 = 16 bits per pixel.
+
+   Green gets 6 bits (vs 5 for R and B) because the human eye is most
+   sensitive to green, and the extra bit improves perceived color fidelity.
+
+To encode an (R, G, B) triplet where each component is 0–255:
+
+.. code-block:: c
+
+   uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
+   {
+       return ((uint16_t)(r & 0xF8) << 8) |   /* top 5 bits of R */
+              ((uint16_t)(g & 0xFC) << 3) |   /* top 6 bits of G */
+              (b >> 3);                         /* top 5 bits of B */
+   }
+
+Common color constants:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 15 65
+
+   * - Color
+     - RGB565 Value
+     - Encoding (R, G, B component bits)
+   * - Red
+     - ``0xF800``
+     - R=31 (max), G=0, B=0
+   * - Green
+     - ``0x07E0``
+     - R=0, G=63 (max), B=0
+   * - Blue
+     - ``0x001F``
+     - R=0, G=0, B=31 (max)
+   * - White
+     - ``0xFFFF``
+     - R=31, G=63, B=31
+   * - Black
+     - ``0x0000``
+     - R=0, G=0, B=0
+   * - Yellow
+     - ``0xFFE0``
+     - R=31, G=63, B=0
+   * - Cyan
+     - ``0x07FF``
+     - R=0, G=63, B=31
+   * - Magenta
+     - ``0xF81F``
+     - R=31, G=0, B=31
+
+Framebuffer Memory Layout
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The framebuffer is a flat array of 16-bit pixels stored **row-major** (left-to-right,
+top-to-bottom).  The address of pixel (x, y) is:
+
+.. code-block:: c
+
+   pixel_offset = y * width + x;          /* in pixels */
+   byte_offset  = (y * width + x) * 2;   /* in bytes  */
+
+For a 4×3 framebuffer the memory layout looks like:
+
+.. code-block:: text
+
+   Pixel (col, row):  (0,0)  (1,0)  (2,0)  (3,0)  | (0,1)  (1,1) ...
+   Byte address:        0      2      4      6         8      10
+
+   Each pixel occupies 2 bytes: [high_byte][low_byte]
+   For pixel color 0xF800 (red):  byte[0]=0xF8, byte[1]=0x00
+
+   stride = width * 2 = 240 * 2 = 480 bytes per row
+   total  = height * stride = 240 * 480 = 115,200 bytes
+
+Byte Order: Big-Endian on the SPI Bus
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. warning::
+
+   There is a **critical byte-order distinction** between what userspace writes
+   and what the ST7789 expects:
+
+   - The ST7789 SPI protocol expects each pixel's **high byte first** (big-endian).
+     For red (0xF800): first byte sent = 0xF8, second byte = 0x00.
+
+   - ARM Linux (little-endian): when userspace writes ``uint16_t val = 0xF800``
+     into a memory buffer, it is stored as byte[0]=0x00, byte[1]=0xF8.
+
+   Therefore the **kernel flush function must swap the two bytes** of every pixel
+   before sending over SPI:
+
+.. code-block:: c
+
+   /* For each pixel at position x in scanline src[]: */
+   line[x * 2]     = src[x * 2 + 1];   /* LE byte1 (high) → SPI first  */
+   line[x * 2 + 1] = src[x * 2];       /* LE byte0 (low)  → SPI second */
+
+This applies only to the **userspace → kernel flush path** (mmap + ioctl).  The
+kernel drawing primitives (st7789_fill, st7789_fill_rect, etc.) write big-endian
+directly because they construct the byte array themselves.
+
+Part 5 – ST7789 Driver Functions Reference
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This section provides complete, copy-pasteable implementations of every function
+students must implement.  Use these as a reference — read and understand each
+function before implementing it yourself in the skeleton.
+
+5.1 – Low-level SPI Primitives
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The two fundamental building blocks are ``st7789_write_cmd()`` and
+``st7789_write_data()``.  Every higher-level function calls one or both of these.
+
+The **DCX (D/C) GPIO** determines whether the byte being clocked is a command
+opcode or a data byte.  It must be **stable for the entire SPI byte transfer**:
+
+.. code-block:: text
+
+   Writing command 0x2C (RAMWR):
+     Step 1: gpiod_set_value(dc, 0)   → DCX = LOW  = command
+     Step 2: spi_write(spi, &0x2C, 1) → clock 8 bits
+
+   Writing 2 data bytes {0xF8, 0x00} (one red pixel):
+     Step 1: gpiod_set_value(dc, 1)      → DCX = HIGH = data
+     Step 2: spi_write(spi, buf, 2)      → clock 16 bits
+
+.. code-block:: c
+
+   /* Set DCX LOW then clock the command opcode. */
+   static int st7789_write_cmd(struct st7789_priv *priv, u8 cmd)
+   {
+       gpiod_set_value(priv->dc, 0);
+       return spi_write(priv->spi, &cmd, 1);
+   }
+
+   /* Set DCX HIGH then clock len data bytes. */
+   static int st7789_write_data(struct st7789_priv *priv,
+                                const u8 *buf, size_t len)
+   {
+       gpiod_set_value(priv->dc, 1);
+       return spi_write(priv->spi, buf, len);
+   }
+
+   /* Convenience wrapper: send a single data byte. */
+   static inline int st7789_write_data_byte(struct st7789_priv *priv, u8 byte)
+   {
+       return st7789_write_data(priv, &byte, 1);
+   }
 
 .. note::
 
-   **CASET / RASET encoding**: all four bytes are 16-bit big-endian values.
-   For a 240-wide panel column 0 is ``0x00 0x00`` and column 239 is ``0x00 0xEF``.
-   Always send CASET before RASET before RAMWR — the order matters.
+   ``gpiod_set_value()`` uses **logical** values that respect the active-low/high
+   polarity declared in the device tree.  ``dc-gpios`` is declared
+   ``GPIO_ACTIVE_HIGH``, so ``gpiod_set_value(priv->dc, 1)`` drives the pin HIGH
+   (data mode) and ``gpiod_set_value(priv->dc, 0)`` drives it LOW (command mode).
 
-Part 4 – Physical Wiring
+5.2 – Hardware Reset
+^^^^^^^^^^^^^^^^^^^^^
+
+The reset line is declared ``GPIO_ACTIVE_LOW`` in the device tree and obtained
+with ``GPIOD_OUT_HIGH`` (i.e., deasserted on boot).  To assert reset we write
+logical 1 (the gpiod layer inverts to physical LOW):
+
+.. code-block:: c
+
+   static void st7789_hw_reset(struct st7789_priv *priv)
+   {
+       gpiod_set_value(priv->reset, 1);   /* assert RESX LOW (active-low) */
+       msleep(20);                         /* hold ≥ 15 ms                 */
+       gpiod_set_value(priv->reset, 0);   /* deassert RESX HIGH           */
+       msleep(150);                        /* wait ≥ 120 ms before cmds    */
+   }
+
+5.3 – Address Window: st7789_set_addr_win
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The address window defines the rectangular region of GRAM that subsequent RAMWR
+pixel data will fill.  CASET sets the column (X) range; RASET sets the row (Y)
+range.  Each takes **four bytes encoding two big-endian 16-bit values**:
+
+.. code-block:: text
+
+   CASET parameter encoding for x0=0, x1=239:
+
+   Byte 0: x0 >> 8  = 0x00   ┐ start column (big-endian)
+   Byte 1: x0 & 0xFF= 0x00   ┘
+   Byte 2: x1 >> 8  = 0x00   ┐ end column (big-endian)
+   Byte 3: x1 & 0xFF= 0xEF   ┘   (239 = 0x00EF)
+
+   RASET parameter encoding for y0=10, y1=49 (a 40-row band):
+
+   Byte 0: 0x00   ┐ start row = 10 = 0x000A
+   Byte 1: 0x0A   ┘
+   Byte 2: 0x00   ┐ end row   = 49 = 0x0031
+   Byte 3: 0x31   ┘
+
+   After CASET + RASET, send RAMWR to open the pixel data stream.
+   Pixel data then fills the window left-to-right, top-to-bottom.
+
+.. code-block:: text
+
+   GRAM window visualised for CASET(20,60) RASET(10,50):
+
+   col:  0    20                60  239
+   row 0:  ┌──────────────────────────┐
+           │                          │
+   row 10: │    ┌────────────┐        │  ← window top-left (20,10)
+           │    │  pixel data│        │
+           │    │  fills here│        │
+   row 50: │    └────────────┘        │  ← window bottom-right (60,50)
+           │                          │
+   row 239:└──────────────────────────┘
+
+.. code-block:: c
+
+   static int st7789_set_addr_win(struct st7789_priv *priv,
+                                  u16 x0, u16 y0, u16 x1, u16 y1)
+   {
+       u8 col[4] = { x0 >> 8, x0 & 0xff, x1 >> 8, x1 & 0xff };
+       u8 row[4] = { y0 >> 8, y0 & 0xff, y1 >> 8, y1 & 0xff };
+       int ret;
+
+       ret = st7789_write_cmd(priv, ST7789_CASET);
+       if (ret) return ret;
+       ret = st7789_write_data(priv, col, 4);
+       if (ret) return ret;
+
+       ret = st7789_write_cmd(priv, ST7789_RASET);
+       if (ret) return ret;
+       ret = st7789_write_data(priv, row, 4);
+       if (ret) return ret;
+
+       return st7789_write_cmd(priv, ST7789_RAMWR);
+   }
+
+5.4 – Full-screen Fill: st7789_fill
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``st7789_fill()`` paints the entire panel with a single color.  The naive approach
+of calling ``st7789_draw_pixel()`` 57,600 times would issue **172,800 SPI
+transactions** (3 per pixel: CASET + RASET + RAMWR).  Instead, we:
+
+1. Set one full-panel address window (3 SPI transactions total).
+2. Allocate one scanline buffer (``width * 2`` bytes) and fill it with the repeated color.
+3. Send that buffer once per row (240 SPI transactions of 480 bytes each).
+
+Total: 243 SPI transactions instead of 172,800 — a **710× reduction**.
+
+.. code-block:: c
+
+   static int st7789_fill(struct st7789_priv *priv, u16 color)
+   {
+       u8 color_hi = color >> 8;
+       u8 color_lo = color & 0xff;
+       u8 *line;
+       int ret = 0, x, y;
+
+       ret = st7789_set_addr_win(priv, 0, 0, priv->width - 1, priv->height - 1);
+       if (ret) return ret;
+
+       line = kmalloc(priv->width * 2, GFP_KERNEL);
+       if (!line) return -ENOMEM;
+
+       /* Build one scanline of the repeated color in big-endian */
+       for (x = 0; x < priv->width; x++) {
+           line[x * 2]     = color_hi;
+           line[x * 2 + 1] = color_lo;
+       }
+
+       /* Send the scanline once per row */
+       for (y = 0; y < priv->height; y++) {
+           ret = st7789_write_data(priv, line, priv->width * 2);
+           if (ret) break;
+       }
+
+       kfree(line);
+       return ret;
+   }
+
+5.5 – Single Pixel: st7789_draw_pixel
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A pixel is a **1×1 address window**.  Set CASET(x,x) RASET(y,y) then send the
+two-byte RGB565 value.  Note: the ST7789 expects big-endian — high byte first.
+
+.. code-block:: text
+
+   For pixel color 0x07FF (cyan):
+     Byte sent 1st: 0x07   (bits 15:8 of 0x07FF)
+     Byte sent 2nd: 0xFF   (bits  7:0 of 0x07FF)
+
+.. code-block:: c
+
+   static int st7789_draw_pixel(struct st7789_priv *priv,
+                                u16 x, u16 y, u16 color)
+   {
+       u8 pixel[2] = { color >> 8, color & 0xff };
+       int ret;
+
+       if (x >= priv->width || y >= priv->height) return 0;
+
+       ret = st7789_set_addr_win(priv, x, y, x, y);
+       if (ret) return ret;
+       return st7789_write_data(priv, pixel, 2);
+   }
+
+5.6 – Filled Rectangle: st7789_fill_rect
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``st7789_fill_rect()`` is a generalisation of ``st7789_fill()``: the address window
+is an arbitrary sub-rectangle instead of the full screen.  Coordinate clamping
+ensures callers do not need to range-check their arguments:
+
+.. code-block:: c
+
+   static int st7789_fill_rect(struct st7789_priv *priv,
+                               u16 x, u16 y, u16 w, u16 h, u16 color)
+   {
+       u8 color_hi = color >> 8;
+       u8 color_lo = color & 0xff;
+       u8 *line;
+       int ret = 0;
+       u16 i, row;
+
+       /* Clamp to panel boundaries */
+       if (x >= priv->width || y >= priv->height) return 0;
+       if (x + w > priv->width)  w = priv->width  - x;
+       if (y + h > priv->height) h = priv->height - y;
+
+       ret = st7789_set_addr_win(priv, x, y, x + w - 1, y + h - 1);
+       if (ret) return ret;
+
+       line = kmalloc(w * 2, GFP_KERNEL);
+       if (!line) return -ENOMEM;
+
+       for (i = 0; i < w; i++) {
+           line[i * 2]     = color_hi;
+           line[i * 2 + 1] = color_lo;
+       }
+       for (row = 0; row < h; row++) {
+           ret = st7789_write_data(priv, line, w * 2);
+           if (ret) break;
+       }
+
+       kfree(line);
+       return ret;
+   }
+
+5.7 – Line Drawing: st7789_draw_line
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The **Bresenham line algorithm** draws a straight line between two arbitrary
+endpoints using only integer addition — no division, no floating point.
+
+The key idea is to maintain an **error accumulator** ``err`` that tracks how far
+the ideal real-valued line deviates from the current integer pixel position.
+When the error exceeds a threshold the minor axis steps by one pixel.
+
+.. code-block:: text
+
+   Example: line from (0,0) to (5,3).  Pixels lit (marked with *):
+
+   row 0:  *  .  .  .  .  .
+   row 1:  .  *  *  .  .  .
+   row 2:  .  .  .  *  *  .
+   row 3:  .  .  .  .  .  *
+
+   The algorithm steps mostly in X (major axis) and occasionally in Y.
+   err = dx + dy  (dx=5, dy=-3, err=2 initially)
+   Each iteration: plot pixel, compute e2=2*err, adjust x and/or y.
+
+.. code-block:: c
+
+   static int st7789_draw_line(struct st7789_priv *priv,
+                               int x0, int y0, int x1, int y1, u16 color)
+   {
+       int dx  =  abs(x1 - x0);       /* horizontal span  */
+       int dy  = -abs(y1 - y0);       /* vertical span, negated */
+       int sx  = (x0 < x1) ? 1 : -1; /* x step direction */
+       int sy  = (y0 < y1) ? 1 : -1; /* y step direction */
+       int err = dx + dy;             /* error accumulator */
+       int e2, ret;
+
+       for (;;) {
+           ret = st7789_draw_pixel(priv, (u16)x0, (u16)y0, color);
+           if (ret) return ret;
+           if (x0 == x1 && y0 == y1) break;
+           e2 = 2 * err;
+           if (e2 >= dy) { if (x0 == x1) break; err += dy; x0 += sx; }
+           if (e2 <= dx) { if (y0 == y1) break; err += dx; y0 += sy; }
+       }
+       return 0;
+   }
+
+5.8 – Circle Outline: st7789_draw_circle
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The **midpoint circle algorithm** exploits 8-fold symmetry: for each step (x, y)
+along one octant it plots 8 mirror-image pixels simultaneously, so only 1/8 of
+the circle's perimeter needs to be computed:
+
+.. code-block:: text
+
+   8-fold symmetry around center (cx, cy):
+
+              (-x,+y) (+x,+y)
+           (-y,+x)         (+y,+x)
+                 ╲    │    ╱
+              ────┼────┼────┼────
+                 ╱    │    ╲
+           (-y,-x)         (+y,-x)
+              (-x,-y) (+x,-y)
+
+   For each computed (x, y): plot all 8 mirror points around (cx, cy).
+
+The **decision variable d** starts at ``1 - r`` and is updated each step:
+
+- If ``d < 0``: the midpoint is inside the circle — step x, update ``d += 2x + 3``.
+- Otherwise: the midpoint is outside — step both x and y, update ``d += 2(x-y) + 5``.
+
+.. code-block:: c
+
+   static int st7789_draw_circle(struct st7789_priv *priv,
+                                 int cx, int cy, int r, u16 color)
+   {
+       int x = 0, y = r, d = 1 - r, ret;
+
+   #define PLOT(px, py) do { \
+       ret = st7789_draw_pixel(priv, (u16)(px), (u16)(py), color); \
+       if (ret) return ret; \
+   } while (0)
+
+       while (x <= y) {
+           PLOT(cx+x, cy+y); PLOT(cx-x, cy+y);
+           PLOT(cx+x, cy-y); PLOT(cx-x, cy-y);
+           PLOT(cx+y, cy+x); PLOT(cx-y, cy+x);
+           PLOT(cx+y, cy-x); PLOT(cx-y, cy-x);
+           if (d < 0) {
+               d += 2 * x + 3;
+           } else {
+               d += 2 * (x - y) + 5;
+               y--;
+           }
+           x++;
+       }
+   #undef PLOT
+       return 0;
+   }
+
+5.9 – Filled Circle: st7789_fill_circle
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Fill a circle by iterating over every horizontal row within the bounding box and
+drawing one **horizontal chord** (a 1-pixel-tall filled rectangle) per row.  For
+each row at vertical offset ``dy`` from the center, the chord half-width is
+``sqrt(r² - dy²)``:
+
+.. code-block:: text
+
+   Filled circle r=5, center (cx,cy).  Each row → one fill_rect:
+
+   dy=-5:        *          (dx=0, width=1)
+   dy=-4:       ***         (dx=3, width=7)
+   dy=-3:      *****        (dx=4, width=9)
+   dy=-2:     *******       (dx=4, width=9)  ← fill_rect(cx-4, cy-2, 9, 1)
+   dy=-1:    *********      (dx=4, width=9)
+   dy= 0:    *********      (dx=5, width=11)
+   dy=+1:    *********
+   ...
+
+.. code-block:: c
+
+   static int st7789_fill_circle(struct st7789_priv *priv,
+                                 int cx, int cy, int r, u16 color)
+   {
+       int dy, dx, ret;
+       for (dy = -r; dy <= r; dy++) {
+           dx = (int)int_sqrt((u32)(r * r - dy * dy));
+           ret = st7789_fill_rect(priv,
+                                  (u16)(cx - dx), (u16)(cy + dy),
+                                  (u16)(2 * dx + 1), 1, color);
+           if (ret) return ret;
+       }
+       return 0;
+   }
+
+5.10 – Userspace Flush: st7789_flush
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When userspace writes pixels via mmap and then calls ``ioctl(ST7789_FLUSH)``,
+the kernel reads the framebuffer (stored as LE uint16_t), **byteswaps each pixel**
+to big-endian, and blasts the result to the display over SPI:
+
+.. code-block:: c
+
+   static int st7789_flush(struct st7789_priv *priv)
+   {
+       u8 *line;
+       int ret = 0, y, x;
+
+       ret = st7789_set_addr_win(priv, 0, 0, priv->width - 1, priv->height - 1);
+       if (ret) return ret;
+
+       line = kmalloc(priv->width * 2, GFP_KERNEL);
+       if (!line) return -ENOMEM;
+
+       for (y = 0; y < priv->height; y++) {
+           const u8 *src = priv->fbuf + y * priv->width * 2;
+           for (x = 0; x < priv->width; x++) {
+               /* Swap LE u16 bytes to big-endian for ST7789 SPI */
+               line[x * 2]     = src[x * 2 + 1];
+               line[x * 2 + 1] = src[x * 2];
+           }
+           ret = st7789_write_data(priv, line, priv->width * 2);
+           if (ret) break;
+       }
+
+       kfree(line);
+       return ret;
+   }
+
+Part 6 – Physical Wiring
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Connect the ST7789 display module (7-pin breakout) to the EXT2 header (J601) as
-shown below.  Use short jumper wires (≤ 15 cm) to keep signal integrity at 40 MHz.
+shown below.  Use short jumper wires (≤ 15 cm) to maintain signal integrity at 40 MHz.
 
 .. list-table::
    :header-rows: 1
    :widths: 18 18 12 52
 
-   * - Display module pin
-     - EXT2 (J601) pin
-     - SoC pad
+   * - Display Module Pin
+     - EXT2 (J601) Pin
+     - SoC Pad
      - Notes
    * - VCC
      - Pin 1 (3.3 V)
      - —
-     - Logic and analog supply.  Do **not** connect to 5 V.
+     - Logic and analog supply.  **Never connect to 5 V.**
    * - GND
      - Pin 6 (GND)
      - —
@@ -513,1359 +996,973 @@ shown below.  Use short jumper wires (≤ 15 cm) to keep signal integrity at 40 
    * - DC (data/cmd)
      - Pin 7
      - GPIO_IO04
-     - Active-high=data; driven by GPIO2_IO04
+     - Active-high = data; driven by GPIO2_IO04
    * - CS
-     - GND (or pin 24 if present)
+     - GND (module internal)
      - —
-     - Module CS is grounded on the module PCB.  LPSPI3_PCS0 on pin 24 is
-       wired but not connected to the display.
+     - Module CS is soldered to GND on the PCB.
 
 .. warning::
 
    Double-check VCC before powering on.  Applying 5 V to the ST7789 module will
-   permanently damage the display controller.
+   **permanently damage** the display controller.
 
-Part 5 – Device Tree for LPSPI3 and the ST7789
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Part 7 – Device Tree
+~~~~~~~~~~~~~~~~~~~~~
 
-The Linux kernel needs a Device Tree (DT) description of the hardware before it
-can bind a driver to the display.  Two DT nodes are required:
+Two device tree nodes are required:
 
-1. An ``&lpspi3`` bus node, activating the controller and setting its pinmux.
-2. An ``st7789`` child node inside ``&lpspi3``, describing the display as an SPI
-   device.
+1. An ``&lpspi3`` bus node activating the LPSPI3 controller.
+2. An ``st7789`` child node describing the display as an SPI device.
 
-The iomux (pin controller) entry for each pad configures the pad as its alternate
-function (LPSPI3) and sets the electrical parameters:
-- ``0x31e``: input buffer enabled, pull-up disabled, 6 mA drive strength (default
-  used for LPSPI3 on i.MX93).
-
-Complete DTS fragment — add to
+Add the following fragment to
 ``repos/lkss-linux/arch/arm64/boot/dts/freescale/imx93-11x11-frdm.dts``:
 
 .. code-block:: devicetree
 
    /* ------------------------------------------------------------------ */
-   /* LPSPI3 bus node: activate the controller on the EXT2 header        */
+   /* LPSPI3 bus node                                                     */
    /* ------------------------------------------------------------------ */
    &lpspi3 {
        #address-cells = <1>;
        #size-cells    = <0>;
        status         = "okay";
 
-       /* Bind the pinctrl group defined below */
        pinctrl-0    = <&pinctrl_lpspi3>;
        pinctrl-names = "default";
 
-       /* ----------------------------------------------------------------
-        * ST7789 display child node.
-        *
-        *   reg = <0>  means chip-select index 0 (LPSPI3_PCS0).
-        *   The display CS pin is grounded on the module, so PCS0 toggles
-        *   but has no electrical effect.
-        * ---------------------------------------------------------------- */
        st7789_display: display@0 {
            compatible        = "lkss,st7789";
-           reg               = <0>;                  /* chip-select 0     */
-           spi-max-frequency = <40000000>;            /* 40 MHz            */
-           /* SPI Mode 0: CPOL=0, CPHA=0 (default; no spi-cpol/spi-cpha) */
+           reg               = <0>;            /* chip-select index 0   */
+           spi-max-frequency = <40000000>;      /* 40 MHz                */
 
-           /*
-            * Reset pin: GPIO2_IO12 (J601 pin 32), active-low.
-            * The kernel asserts the line LOW to reset the display.
-            */
+           /* Reset: GPIO2_IO12 (J601 pin 32), active-low */
            reset-gpios = <&gpio2 12 GPIO_ACTIVE_LOW>;
 
-           /*
-            * Data/Command pin: GPIO2_IO04 (J601 pin 7), active-high.
-            * HIGH = data mode, LOW = command mode.
-            */
+           /* D/C:   GPIO2_IO04 (J601 pin  7), active-high = data */
            dc-gpios    = <&gpio2  4 GPIO_ACTIVE_HIGH>;
-
-           /* Panel resolution used in the driver */
-           width  = <240>;
-           height = <240>;
        };
    };
 
    /* ------------------------------------------------------------------ */
-   /* iomuxc pinctrl group: LPSPI3 + GPIO lines for RST and D/C          */
+   /* iomuxc pin group: LPSPI3 + RST + D/C GPIOs                         */
    /* ------------------------------------------------------------------ */
    &iomuxc {
        pinctrl_lpspi3: lpspi3-grp {
            fsl,pins = <
-               /* GPIO_IO11 -> LPSPI3_SCK  (J601 pin 23) */
-               MX93_PAD_GPIO_IO11__LPSPI3_SCK        0x31e
-               /* GPIO_IO10 -> LPSPI3_SOUT / MOSI (J601 pin 19) */
-               MX93_PAD_GPIO_IO10__LPSPI3_SOUT       0x31e
-               /* GPIO_IO09 -> LPSPI3_SIN  / MISO (J601 pin 21, nc) */
-               MX93_PAD_GPIO_IO09__LPSPI3_SIN        0x31e
-               /* GPIO_IO08 -> LPSPI3_PCS0 / CS0  (J601 pin 24, nc) */
-               MX93_PAD_GPIO_IO08__LPSPI3_PCS0       0x31e
-
-               /* GPIO_IO12 -> RST output (J601 pin 32) */
-               MX93_PAD_GPIO_IO12__GPIO2_IO12        0x31e
-               /* GPIO_IO04 -> D/C output  (J601 pin  7) */
-               MX93_PAD_GPIO_IO04__GPIO2_IO04        0x31e
+               MX93_PAD_GPIO_IO11__LPSPI3_SCK   0x31e   /* J601 pin 23 */
+               MX93_PAD_GPIO_IO10__LPSPI3_SOUT  0x31e   /* J601 pin 19 */
+               MX93_PAD_GPIO_IO09__LPSPI3_SIN   0x31e   /* J601 pin 21 */
+               MX93_PAD_GPIO_IO08__LPSPI3_PCS0  0x31e   /* J601 pin 24 */
+               MX93_PAD_GPIO_IO12__GPIO2_IO12   0x31e   /* J601 pin 32, RST */
+               MX93_PAD_GPIO_IO04__GPIO2_IO04   0x31e   /* J601 pin  7, D/C */
            >;
        };
    };
 
 .. note::
 
-   The ``MX93_PAD_*`` macros are defined in
-   ``arch/arm64/boot/dts/freescale/imx93-pinfunc.h``.  Each macro encodes
-   the register offset and mux value; the second argument is the pad config
-   register value (drive strength, pull, slew rate).
+   ``MX93_PAD_*`` macros are defined in
+   ``arch/arm64/boot/dts/freescale/imx93-pinfunc.h``.
+   The pad config value ``0x31e`` sets: input buffer enabled, pull-up disabled,
+   6 mA drive strength.
 
-----
+Part 8 – Userspace Interface: the ST7789 Miscdevice
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Lab Exercises
--------------
+After the kernel driver is complete, it registers a **miscdevice** (character
+device) named ``"st7789"``, accessible at ``/dev/st7789``.  Userspace programs
+can draw to the display without any knowledge of SPI or the ST7789 command set.
 
-.. note::
+Interface Summary
+^^^^^^^^^^^^^^^^^^
 
-   Lab source code skeleton is under
-   ``repos/lkss-linux/drivers/lkss/labs/lab3/``.  Enable
-   ``CONFIG_LKSS_LAB3`` in menuconfig before building.
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
 
-   Hardware setup for today:
+   * - Operation
+     - Description
+   * - ``open("/dev/st7789", O_RDWR)``
+     - Open the device for reading and writing.
+   * - ``mmap(NULL, ST7789_FBSIZE, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0)``
+     - Map the kernel framebuffer (vmalloc_user region) into userspace.
+       Write RGB565 pixels directly into this buffer.
+   * - ``ioctl(fd, ST7789_FLUSH)``
+     - Push the framebuffer to the ST7789 panel over SPI.
+       The kernel byteswaps each pixel from LE to BE before sending.
+   * - ``write(fd, buf, count)``
+     - Write raw RGB565 bytes into the framebuffer at the current file
+       position (``lseek`` to position within the frame).
 
-   - Wire the ST7789 display module to the EXT2 connector as shown in the
-     *Physical Wiring* table above.
-   - Verify 3.3 V supply and ground connections before powering on.
-   - See :ref:`imx93-frdm-ext2-header` for the full header pin map.
+The ``lkss_st7789.h`` Header
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-----
-
-Exercise 1 – Driver Skeleton: Module, Probe, and Remove
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-**Objective**: Create the minimal boilerplate of an SPI driver that compiles,
-loads, and binds to the ``"lkss,st7789"`` compatible string.  This is the
-foundation that all subsequent exercises build on.
-
-**Background**: Every Linux SPI driver follows a fixed structure.  You register
-an ``spi_driver`` struct with ``module_spi_driver()``.  The kernel calls your
-``probe`` function when the DT compatible string matches a device node.
-
-Study the skeleton file:
-
-.. code-block:: bash
-
-   less repos/lkss-linux/drivers/lkss/labs/lab3/st7789.c
-
-The full driver skeleton is shown below.  **Read every comment carefully** —
-the comments explain *why* each piece exists, not just *what* it does.
+All userspace programs include ``demo/lkss_st7789.h`` instead of ``<linux/fb.h>``:
 
 .. code-block:: c
 
-   // SPDX-License-Identifier: GPL-2.0
-   /*
-    * st7789.c - Minimal SPI driver for the ST7789 240x240 TFT display
-    *
-    * This driver is deliberately simple.  It does not use the fbtft staging
-    * framework.  Every primitive is written from scratch so that students
-    * understand exactly what goes over the SPI bus.
-    *
-    * Hardware connections (i.MX93 FRDM EXT2 / J601):
-    *   MOSI  <- GPIO_IO10 (LPSPI3_SOUT, J601 pin 19)
-    *   SCK   <- GPIO_IO11 (LPSPI3_SCK,  J601 pin 23)
-    *   CS    <- GND on module (LPSPI3_PCS0 toggled but unconnected)
-    *   RST   <- GPIO_IO12 (GPIO2_IO12,   J601 pin 32)  active-low
-    *   D/C   <- GPIO_IO04 (GPIO2_IO04,   J601 pin  7)  high=data
-    */
+   /* demo/lkss_st7789.h */
+   #ifndef LKSS_ST7789_H
+   #define LKSS_ST7789_H
 
-   #include <linux/module.h>
-   #include <linux/spi/spi.h>
-   #include <linux/gpio/consumer.h>
-   #include <linux/delay.h>
-   #include <linux/of.h>
+   #include <stdint.h>
+   #include <sys/ioctl.h>
 
-   /* ------------------------------------------------------------------
-    * ST7789 command opcodes (from the ST7789VW datasheet, chapter 9)
-    * ------------------------------------------------------------------ */
-   #define ST7789_NOP       0x00  /* no-operation                        */
-   #define ST7789_SWRESET   0x01  /* software reset                      */
-   #define ST7789_SLPOUT    0x11  /* sleep out                           */
-   #define ST7789_NORON     0x13  /* normal display mode on              */
-   #define ST7789_INVOFF    0x20  /* display inversion off               */
-   #define ST7789_INVON     0x21  /* display inversion on                */
-   #define ST7789_DISPOFF   0x28  /* display off                         */
-   #define ST7789_DISPON    0x29  /* display on                          */
-   #define ST7789_CASET     0x2A  /* column address set                  */
-   #define ST7789_RASET     0x2B  /* row address set                     */
-   #define ST7789_RAMWR     0x2C  /* memory write                        */
-   #define ST7789_MADCTL    0x36  /* memory data access control          */
-   #define ST7789_COLMOD    0x3A  /* interface pixel format              */
-
-   /* COLMOD parameter: 16 bits per pixel, RGB 5-6-5 */
-   #define ST7789_COLMOD_RGB565  0x55
-
-   /* MADCTL parameter: normal orientation, RGB (not BGR) color order */
-   #define ST7789_MADCTL_NORMAL  0x00
-
-   /* Panel dimensions for the 240x240 module used in this lab */
+   /* Fixed display geometry */
    #define ST7789_WIDTH   240
    #define ST7789_HEIGHT  240
+   #define ST7789_BPP     16
+   #define ST7789_STRIDE  (ST7789_WIDTH * 2)               /* bytes per row  */
+   #define ST7789_FBSIZE  (ST7789_HEIGHT * ST7789_STRIDE)  /* 115200 bytes   */
 
-   /* ------------------------------------------------------------------
-    * Driver private state
-    *
-    * One instance of this struct is allocated per device in probe()
-    * and stored with spi_set_drvdata() so other functions can reach it.
-    * ------------------------------------------------------------------ */
-   struct st7789_priv {
-       struct spi_device  *spi;    /* back-pointer to the SPI device  */
-       struct gpio_desc   *dc;     /* D/C (data/command) GPIO         */
-       struct gpio_desc   *reset;  /* hardware reset GPIO             */
-       u16                 width;  /* panel width  in pixels          */
-       u16                 height; /* panel height in pixels          */
+   /* Single ioctl: push mmap'd framebuffer to the panel */
+   #define ST7789_IOC_MAGIC  'V'
+   #define ST7789_FLUSH      _IO(ST7789_IOC_MAGIC, 0)
+
+   /* Minimal screen-info stubs (only the fields demos actually use) */
+   struct fb_var_screeninfo {
+       uint32_t xres;
+       uint32_t yres;
+       uint32_t bits_per_pixel;
    };
 
-   /* ------------------------------------------------------------------
-    * POINT 1 - Low-level SPI primitives: write_cmd and write_data
-    *
-    * These two functions are the building blocks for everything else.
-    * All higher-level functions (init, fill, draw) call only these two.
-    * ------------------------------------------------------------------ */
-
-   /**
-    * st7789_write_cmd - send a single command byte to the display
-    * @priv: driver private data
-    * @cmd:  command opcode (e.g. ST7789_CASET = 0x2A)
-    *
-    * The D/C line is driven LOW before the byte is clocked out to signal
-    * to the ST7789 that the byte is a command, not a data parameter.
-    *
-    * Returns 0 on success or a negative error code from spi_write().
-    */
-   static int st7789_write_cmd(struct st7789_priv *priv, u8 cmd)
-   {
-       /* D/C LOW = command mode */
-       gpiod_set_value(priv->dc, 0);
-
-       /* spi_write() is a convenience wrapper around spi_sync().
-        * It creates a single spi_transfer containing the buffer,
-        * wraps it in an spi_message, and submits it synchronously.
-        * It blocks until the transfer completes (or an error occurs). */
-       return spi_write(priv->spi, &cmd, 1);
-   }
-
-   /**
-    * st7789_write_data - send one or more data bytes to the display
-    * @priv: driver private data
-    * @buf:  pointer to the byte buffer to send
-    * @len:  number of bytes to send
-    *
-    * The D/C line is driven HIGH before the bytes are clocked out to signal
-    * to the ST7789 that the bytes are data parameters (or pixel data).
-    *
-    * Returns 0 on success or a negative error code from spi_write().
-    */
-   static int st7789_write_data(struct st7789_priv *priv,
-                                const u8 *buf, size_t len)
-   {
-       /* D/C HIGH = data mode */
-       gpiod_set_value(priv->dc, 1);
-       return spi_write(priv->spi, buf, len);
-   }
-
-   /**
-    * st7789_write_data_byte - convenience wrapper to send a single data byte
-    * @priv: driver private data
-    * @byte: the single data byte to send
-    */
-   static inline int st7789_write_data_byte(struct st7789_priv *priv, u8 byte)
-   {
-       return st7789_write_data(priv, &byte, 1);
-   }
-
-   /* ------------------------------------------------------------------
-    * POINT 2 - Hardware reset
-    *
-    * Before sending any commands we must properly reset the controller.
-    * The reset sequence is defined in the ST7789VW datasheet section 8.16:
-    *   - drive RESX LOW for at least 15 ms
-    *   - drive RESX HIGH and wait at least 120 ms before the first command
-    * ------------------------------------------------------------------ */
-
-   /**
-    * st7789_hw_reset - perform a hardware reset of the ST7789 controller
-    * @priv: driver private data
-    *
-    * After this function returns the controller is in its power-on default
-    * state and is ready to accept initialization commands.
-    */
-   static void st7789_hw_reset(struct st7789_priv *priv)
-   {
-       /* Assert reset (active-low; gpiod already accounts for polarity) */
-       gpiod_set_value(priv->reset, 1);  /* assert (the desc is active-low) */
-       msleep(15);                        /* hold for at least 15 ms         */
-
-       /* Release reset */
-       gpiod_set_value(priv->reset, 0);  /* deassert                        */
-       msleep(120);                       /* wait for the controller to boot */
-   }
-
-   /* ------------------------------------------------------------------
-    * POINT 3 - Initialization sequence
-    *
-    * After hardware reset the controller is in sleep mode.  We must send
-    * a sequence of commands to configure pixel format, orientation, and to
-    * wake the display up.  The sequence below is derived from:
-    *   - The ST7789VW datasheet chapter 8 and 9
-    *   - The Linux staging driver: drivers/staging/fbtft/fb_st7789v.c
-    * ------------------------------------------------------------------ */
-
-   /**
-    * st7789_init_display - send the initialization command sequence
-    * @priv: driver private data
-    *
-    * Returns 0 on success or a negative error code on the first failure.
-    */
-   static int st7789_init_display(struct st7789_priv *priv)
-   {
-       int ret;
-
-       /* Software reset: resets all registers to their default values.
-        * Must wait at least 150 ms before the next command. */
-       ret = st7789_write_cmd(priv, ST7789_SWRESET);
-       if (ret)
-           return ret;
-       msleep(150);
-
-       /* Exit sleep mode.  The DC/DC converter and oscillator start up.
-        * Must wait at least 500 ms before sending DISPON. */
-       ret = st7789_write_cmd(priv, ST7789_SLPOUT);
-       if (ret)
-           return ret;
-       msleep(500);
-
-       /* Set pixel format to RGB565 (16 bits per pixel).
-        * Parameter 0x55: DPI=101 (RGB565), DBI=101 (RGB565). */
-       ret = st7789_write_cmd(priv, ST7789_COLMOD);
-       if (ret)
-           return ret;
-       ret = st7789_write_data_byte(priv, ST7789_COLMOD_RGB565);
-       if (ret)
-           return ret;
-
-       /* Memory data access control: set scan direction and color order.
-        * 0x00 = normal scan, RGB (not BGR) order, no mirroring. */
-       ret = st7789_write_cmd(priv, ST7789_MADCTL);
-       if (ret)
-           return ret;
-       ret = st7789_write_data_byte(priv, ST7789_MADCTL_NORMAL);
-       if (ret)
-           return ret;
-
-       /* Enable display inversion.  Most ST7789 modules are manufactured
-        * with the inversion bit set by default; sending INVON produces
-        * correct (non-inverted) colors on such panels.  If your panel
-        * shows inverted colors, swap INVON for INVOFF (0x20). */
-       ret = st7789_write_cmd(priv, ST7789_INVON);
-       if (ret)
-           return ret;
-
-       /* Normal display mode on (no partial mode). */
-       ret = st7789_write_cmd(priv, ST7789_NORON);
-       if (ret)
-           return ret;
-
-       /* Turn on the display output.  Wait at least 100 ms. */
-       ret = st7789_write_cmd(priv, ST7789_DISPON);
-       if (ret)
-           return ret;
-       msleep(100);
-
-       return 0;
-   }
-
-   /* ------------------------------------------------------------------
-    * POINT 4 - Address window and pixel fill
-    *
-    * To write pixels to the display we first define a rectangular window
-    * using CASET (column/X range) and RASET (row/Y range), then send pixel
-    * data with RAMWR.  The controller auto-advances the write pointer.
-    * ------------------------------------------------------------------ */
-
-   /**
-    * st7789_set_addr_win - set the active drawing window
-    * @priv: driver private data
-    * @x0:   left column  (inclusive, 0-based)
-    * @y0:   top row      (inclusive, 0-based)
-    * @x1:   right column (inclusive)
-    * @y1:   bottom row   (inclusive)
-    *
-    * After this call, pixel data sent with RAMWR fills the rectangle
-    * [x0, x1] x [y0, y1] in row-major order.
-    */
-   static int st7789_set_addr_win(struct st7789_priv *priv,
-                                   u16 x0, u16 y0, u16 x1, u16 y1)
-   {
-       /* Column address set: send CASET followed by four bytes.
-        * The four bytes encode two 16-bit big-endian values:
-        *   XS (start column): x0,  split into [x0 >> 8, x0 & 0xff]
-        *   XE (end column):   x1,  split into [x1 >> 8, x1 & 0xff] */
-       u8 col[4] = { x0 >> 8, x0 & 0xff, x1 >> 8, x1 & 0xff };
-       u8 row[4] = { y0 >> 8, y0 & 0xff, y1 >> 8, y1 & 0xff };
-       int ret;
-
-       ret = st7789_write_cmd(priv, ST7789_CASET);
-       if (ret)
-           return ret;
-       ret = st7789_write_data(priv, col, 4);
-       if (ret)
-           return ret;
-
-       /* Row address set: same encoding as CASET but for rows (Y axis). */
-       ret = st7789_write_cmd(priv, ST7789_RASET);
-       if (ret)
-           return ret;
-       ret = st7789_write_data(priv, row, 4);
-       if (ret)
-           return ret;
-
-       /* Begin memory write: following data bytes are pixel colors. */
-       return st7789_write_cmd(priv, ST7789_RAMWR);
-   }
-
-   /**
-    * st7789_fill - fill the entire display with a single RGB565 color
-    * @priv:  driver private data
-    * @color: RGB565 color value (e.g. 0xF800 = red, 0x07E0 = green,
-    *         0x001F = blue, 0xFFFF = white, 0x0000 = black)
-    *
-    * This function sets the address window to the full panel and then
-    * writes (width x height) pixels.  To reduce the number of SPI
-    * transactions we send one full scanline at a time.
-    */
-   static int st7789_fill(struct st7789_priv *priv, u16 color)
-   {
-       /* Width in bytes: each RGB565 pixel is 2 bytes on the SPI bus.
-        * The ST7789 expects the pixel in big-endian order:
-        *   first byte  = color >> 8   (R[4:0] | G[5:3])
-        *   second byte = color & 0xff (G[2:0] | B[4:0])        */
-       u8 color_hi = color >> 8;
-       u8 color_lo = color & 0xff;
-       u8 *line;
-       int ret, x, y;
-
-       ret = st7789_set_addr_win(priv, 0, 0,
-                                  priv->width - 1, priv->height - 1);
-       if (ret)
-           return ret;
-
-       /* Allocate a single scanline buffer and reuse it for all rows.
-        * Using GFP_KERNEL is fine here because probe() runs in process
-        * context (no interrupt, no atomic section). */
-       line = kmalloc(priv->width * 2, GFP_KERNEL);
-       if (!line)
-           return -ENOMEM;
-
-       /* Fill the scanline buffer with the repeated color */
-       for (x = 0; x < priv->width; x++) {
-           line[x * 2]     = color_hi;
-           line[x * 2 + 1] = color_lo;
-       }
-
-       /* Send height scanlines; each scanline is (width * 2) bytes */
-       for (y = 0; y < priv->height; y++) {
-           ret = st7789_write_data(priv, line, priv->width * 2);
-           if (ret)
-               break;
-       }
-
-       kfree(line);
-       return ret;
-   }
-
-   /* ------------------------------------------------------------------
-    * POINT 5 - Filled rectangle
-    *
-    * A filled rectangle is the fundamental drawing primitive.  All other
-    * shapes (lines, circles, text) can be built from it or from pixels.
-    * ------------------------------------------------------------------ */
-
-   /**
-    * st7789_fill_rect - draw a filled rectangle
-    * @priv:  driver private data
-    * @x:     left edge (column, 0-based)
-    * @y:     top edge  (row, 0-based)
-    * @w:     width in pixels
-    * @h:     height in pixels
-    * @color: RGB565 fill color
-    *
-    * Clamps the rectangle to the panel boundaries silently.
-    */
-   static int st7789_fill_rect(struct st7789_priv *priv,
-                                u16 x, u16 y, u16 w, u16 h, u16 color)
-   {
-       u8 color_hi = color >> 8;
-       u8 color_lo = color & 0xff;
-       u8 *line;
-       int ret = 0;
-       u16 i, row;
-
-       /* Clamp rectangle to panel boundaries */
-       if (x >= priv->width || y >= priv->height)
-           return 0;
-       if (x + w > priv->width)
-           w = priv->width - x;
-       if (y + h > priv->height)
-           h = priv->height - y;
-
-       ret = st7789_set_addr_win(priv, x, y, x + w - 1, y + h - 1);
-       if (ret)
-           return ret;
-
-       /* Allocate one row buffer and reuse it for all rows */
-       line = kmalloc(w * 2, GFP_KERNEL);
-       if (!line)
-           return -ENOMEM;
-
-       for (i = 0; i < w; i++) {
-           line[i * 2]     = color_hi;
-           line[i * 2 + 1] = color_lo;
-       }
-
-       for (row = 0; row < h; row++) {
-           ret = st7789_write_data(priv, line, w * 2);
-           if (ret)
-               break;
-       }
-
-       kfree(line);
-       return ret;
-   }
-
-   /* ------------------------------------------------------------------
-    * POINT 6 - Single pixel write
-    *
-    * A pixel is just a 1x1 filled rectangle.  We provide a dedicated
-    * function because many algorithms (Bresenham line, circle) write
-    * individual pixels and the overhead of a full fill_rect call adds up.
-    * In a real driver you would batch these; for the lab, clarity first.
-    * ------------------------------------------------------------------ */
-
-   /**
-    * st7789_draw_pixel - set a single pixel to the given color
-    * @priv:  driver private data
-    * @x:     column (0-based)
-    * @y:     row (0-based)
-    * @color: RGB565 color
-    */
-   static int st7789_draw_pixel(struct st7789_priv *priv,
-                                 u16 x, u16 y, u16 color)
-   {
-       u8 pixel[2] = { color >> 8, color & 0xff };
-       int ret;
-
-       if (x >= priv->width || y >= priv->height)
-           return 0;
-
-       ret = st7789_set_addr_win(priv, x, y, x, y);
-       if (ret)
-           return ret;
-
-       return st7789_write_data(priv, pixel, 2);
-   }
-
-   /* ------------------------------------------------------------------
-    * POINT 7 - Bresenham line drawing
-    *
-    * The Bresenham line algorithm draws an anti-aliased-free line between
-    * two arbitrary endpoints using only integer arithmetic.  It is the
-    * standard algorithm used in embedded graphics libraries.
-    *
-    * Reference: Bresenham, J.E. (1965). "Algorithm for computer control
-    * of a digital plotter". IBM Systems Journal 4(1): 25-30.
-    * ------------------------------------------------------------------ */
-
-   /**
-    * st7789_draw_line - draw a line between two points
-    * @priv:   driver private data
-    * @x0, y0: start point
-    * @x1, y1: end point
-    * @color:  RGB565 color
-    *
-    * Uses Bresenham's integer line-drawing algorithm.
-    */
-   static int st7789_draw_line(struct st7789_priv *priv,
-                                int x0, int y0, int x1, int y1, u16 color)
-   {
-       /* Bresenham state variables */
-       int dx  =  abs(x1 - x0);  /* horizontal distance                  */
-       int dy  = -abs(y1 - y0);  /* vertical distance (negated for error) */
-       int sx  = (x0 < x1) ? 1 : -1;  /* x step direction               */
-       int sy  = (y0 < y1) ? 1 : -1;  /* y step direction               */
-       int err = dx + dy;              /* initial error accumulator       */
-       int e2;
-       int ret;
-
-       for (;;) {
-           ret = st7789_draw_pixel(priv, (u16)x0, (u16)y0, color);
-           if (ret)
-               return ret;
-
-           /* Check if we have reached the end point */
-           if (x0 == x1 && y0 == y1)
-               break;
-
-           e2 = 2 * err;
-
-           /* Step in the X direction if the error allows */
-           if (e2 >= dy) {
-               if (x0 == x1)
-                   break;
-               err += dy;
-               x0  += sx;
-           }
-
-           /* Step in the Y direction if the error allows */
-           if (e2 <= dx) {
-               if (y0 == y1)
-                   break;
-               err += dx;
-               y0  += sy;
-           }
-       }
-
-       return 0;
-   }
-
-   /* ------------------------------------------------------------------
-    * POINT 8 - Midpoint circle algorithm
-    *
-    * Draws the outline of a circle using Bresenham's midpoint circle
-    * algorithm (sometimes attributed to Bresenham or to Pitteway).
-    * It exploits the 8-fold symmetry of a circle to draw 8 pixels per
-    * iteration.
-    * ------------------------------------------------------------------ */
-
-   /**
-    * st7789_draw_circle - draw the outline of a circle
-    * @priv:   driver private data
-    * @cx, cy: center coordinates
-    * @r:      radius in pixels
-    * @color:  RGB565 color
-    */
-   static int st7789_draw_circle(struct st7789_priv *priv,
-                                  int cx, int cy, int r, u16 color)
-   {
-       /* Midpoint circle algorithm state */
-       int x   = 0;
-       int y   = r;
-       int d   = 1 - r;   /* decision parameter */
-       int ret = 0;
-
-       /* Helper lambda-style macro: draw one symmetric pixel, check error */
-   #define PLOT(px, py) do {                                       \
-       ret = st7789_draw_pixel(priv, (u16)(px), (u16)(py), color); \
-       if (ret) return ret;                                         \
-   } while (0)
-
-       while (x <= y) {
-           /* 8 symmetric pixels of the circle */
-           PLOT(cx + x, cy + y);
-           PLOT(cx - x, cy + y);
-           PLOT(cx + x, cy - y);
-           PLOT(cx - x, cy - y);
-           PLOT(cx + y, cy + x);
-           PLOT(cx - y, cy + x);
-           PLOT(cx + y, cy - x);
-           PLOT(cx - y, cy - x);
-
-           /* Update decision parameter */
-           if (d < 0) {
-               d += 2 * x + 3;
-           } else {
-               d += 2 * (x - y) + 5;
-               y--;
-           }
-           x++;
-       }
-   #undef PLOT
-
-       return 0;
-   }
-
-   /* ------------------------------------------------------------------
-    * POINT 9 - Filled circle
-    *
-    * A filled circle is built from st7789_fill_rect(): for each row of
-    * the circle we compute the horizontal chord length using the circle
-    * equation and draw a horizontal filled rectangle.
-    * ------------------------------------------------------------------ */
-
-   /**
-    * st7789_fill_circle - draw a filled circle
-    * @priv:   driver private data
-    * @cx, cy: center coordinates
-    * @r:      radius in pixels
-    * @color:  RGB565 fill color
-    */
-   static int st7789_fill_circle(struct st7789_priv *priv,
-                                  int cx, int cy, int r, u16 color)
-   {
-       int dy, dx, ret;
-
-       /* Iterate over every row within the circle bounding box */
-       for (dy = -r; dy <= r; dy++) {
-           /* For each row, compute the half-chord length using
-            * the Pythagorean theorem: dx = sqrt(r^2 - dy^2)      */
-           dx = (int)int_sqrt((u32)(r * r - dy * dy));
-           ret = st7789_fill_rect(priv,
-                                   (u16)(cx - dx), (u16)(cy + dy),
-                                   (u16)(2 * dx + 1), 1,
-                                   color);
-           if (ret)
-               return ret;
-       }
-
-       return 0;
-   }
-
-   /* ------------------------------------------------------------------
-    * POINT 10 - Demo pattern
-    *
-    * Called from probe() to verify that the display and all primitives
-    * work correctly.  It draws a recognizable test image so you can
-    * visually confirm each function.
-    * ------------------------------------------------------------------ */
-
-   /**
-    * st7789_demo - draw a test pattern on the display
-    * @priv: driver private data
-    *
-    * Pattern:
-    *   1. Black background
-    *   2. Red border (4 px thick)
-    *   3. Green filled circle in the top-left quadrant
-    *   4. Blue filled rectangle in the bottom-right quadrant
-    *   5. White diagonal line across the full display
-    *   6. Yellow circle outline in the center
-    */
-   static int st7789_demo(struct st7789_priv *priv)
-   {
-       int ret;
-
-       /* Step 1: black background */
-       ret = st7789_fill(priv, 0x0000);
-       if (ret)
-           return ret;
-
-       /* Step 2: red border, 4 pixels thick */
-       st7789_fill_rect(priv,   0,   0, 240,   4, 0xF800);  /* top    */
-       st7789_fill_rect(priv,   0, 236, 240,   4, 0xF800);  /* bottom */
-       st7789_fill_rect(priv,   0,   0,   4, 240, 0xF800);  /* left   */
-       st7789_fill_rect(priv, 236,   0,   4, 240, 0xF800);  /* right  */
-
-       /* Step 3: green filled circle, center (60,60), radius 50 */
-       ret = st7789_fill_circle(priv, 60, 60, 50, 0x07E0);
-       if (ret)
-           return ret;
-
-       /* Step 4: blue filled rectangle in the bottom-right area */
-       ret = st7789_fill_rect(priv, 130, 130, 100, 100, 0x001F);
-       if (ret)
-           return ret;
-
-       /* Step 5: white diagonal line from top-left to bottom-right */
-       ret = st7789_draw_line(priv, 5, 5, 234, 234, 0xFFFF);
-       if (ret)
-           return ret;
-
-       /* Step 6: yellow circle outline in the center */
-       ret = st7789_draw_circle(priv, 120, 120, 40, 0xFFE0);
-       if (ret)
-           return ret;
-
-       return 0;
-   }
-
-   /* ------------------------------------------------------------------
-    * SPI driver probe and remove
-    * ------------------------------------------------------------------ */
-
-   /**
-    * st7789_probe - called by the SPI core when a matching device is found
-    * @spi: the SPI device instance created from the device tree node
-    *
-    * The probe function:
-    *   1. Configures the SPI controller parameters (mode, speed).
-    *   2. Allocates and initialises driver private state.
-    *   3. Obtains GPIO descriptors for RST and D/C.
-    *   4. Resets and initialises the ST7789.
-    *   5. Draws the demo pattern.
-    *
-    * Returns 0 on success or a negative error code on failure.
-    * devm_* allocations are automatically freed on driver removal.
-    */
-   static int st7789_probe(struct spi_device *spi)
-   {
-       struct st7789_priv *priv;
-       int ret;
-
-       /* --- Step 1: configure SPI controller parameters --------- */
-
-       /* The ST7789 uses SPI Mode 0 (CPOL=0, CPHA=0).
-        * spi->mode may already be set from the device tree node, but
-        * we set it explicitly here for clarity. */
-       spi->mode = SPI_MODE_0;
-
-       /* Apply the mode and speed from spi->mode / spi->max_speed_hz.
-        * spi_setup() returns 0 on success or a negative error code. */
-       ret = spi_setup(spi);
-       if (ret < 0) {
-           dev_err(&spi->dev, "spi_setup() failed: %d\n", ret);
-           return ret;
-       }
-
-       dev_info(&spi->dev, "ST7789 probe: speed=%u Hz mode=0x%02x\n",
-                spi->max_speed_hz, spi->mode);
-
-       /* --- Step 2: allocate private state ----------------------- */
-
-       /* devm_kzalloc() allocates zero-initialised memory tied to
-        * the lifetime of the spi device.  It is freed automatically
-        * when the device is removed (no need to call kfree in remove). */
-       priv = devm_kzalloc(&spi->dev, sizeof(*priv), GFP_KERNEL);
-       if (!priv)
-           return -ENOMEM;
-
-       priv->spi    = spi;
-       priv->width  = ST7789_WIDTH;
-       priv->height = ST7789_HEIGHT;
-
-       /* Store the private data so it can be retrieved in remove() */
-       spi_set_drvdata(spi, priv);
-
-       /* --- Step 3: obtain GPIO descriptors ---------------------- */
-
-       /* devm_gpiod_get() looks up a GPIO descriptor from the device
-        * tree property whose name matches the "con_id" argument with
-        * the "-gpios" suffix appended: "reset" -> "reset-gpios",
-        *                               "dc"    -> "dc-gpios".
-        * GPIOD_OUT_HIGH sets the initial output state to high (inactive
-        * for an active-low reset signal; active for D/C = data).        */
-       priv->reset = devm_gpiod_get(&spi->dev, "reset", GPIOD_OUT_HIGH);
-       if (IS_ERR(priv->reset)) {
-           dev_err(&spi->dev, "failed to get reset GPIO: %ld\n",
-                   PTR_ERR(priv->reset));
-           return PTR_ERR(priv->reset);
-       }
-
-       priv->dc = devm_gpiod_get(&spi->dev, "dc", GPIOD_OUT_LOW);
-       if (IS_ERR(priv->dc)) {
-           dev_err(&spi->dev, "failed to get D/C GPIO: %ld\n",
-                   PTR_ERR(priv->dc));
-           return PTR_ERR(priv->dc);
-       }
-
-       /* --- Step 4: hardware reset and initialization ------------ */
-
-       st7789_hw_reset(priv);
-
-       ret = st7789_init_display(priv);
-       if (ret) {
-           dev_err(&spi->dev, "display initialization failed: %d\n", ret);
-           return ret;
-       }
-
-       /* --- Step 5: draw demo pattern ---------------------------- */
-
-       ret = st7789_demo(priv);
-       if (ret) {
-           dev_err(&spi->dev, "demo pattern failed: %d\n", ret);
-           return ret;
-       }
-
-       dev_info(&spi->dev, "ST7789 240x240 display initialized successfully\n");
-       return 0;
-   }
-
-   /**
-    * st7789_remove - called when the driver is unloaded or the device removed
-    * @spi: the SPI device instance
-    *
-    * Turns off the display.  All devm_ resources (GPIO, memory) are released
-    * automatically by the device framework after this function returns.
-    */
-   static void st7789_remove(struct spi_device *spi)
-   {
-       struct st7789_priv *priv = spi_get_drvdata(spi);
-
-       /* Turn off the display output before shutting down */
-       st7789_write_cmd(priv, ST7789_DISPOFF);
-
-       dev_info(&spi->dev, "ST7789 removed\n");
-   }
-
-   /* ------------------------------------------------------------------
-    * Device-tree and SPI matching tables
-    * ------------------------------------------------------------------ */
-
-   /* of_device_id table: used when booting from a device tree.
-    * The kernel matches the "compatible" property in the DT node against
-    * every entry in this table; a match triggers probe(). */
-   static const struct of_device_id st7789_of_match[] = {
-       { .compatible = "lkss,st7789" },
-       { /* sentinel */ }
-   };
-   MODULE_DEVICE_TABLE(of, st7789_of_match);
-
-   /* spi_device_id table: used for non-DT (board-file) matching.
-    * Required by module_spi_driver() even when DT matching is used. */
-   static const struct spi_device_id st7789_spi_ids[] = {
-       { "st7789", 0 },
-       { /* sentinel */ }
-   };
-   MODULE_DEVICE_TABLE(spi, st7789_spi_ids);
-
-   /* spi_driver struct: the registration record for this driver. */
-   static struct spi_driver st7789_driver = {
-       .driver = {
-           .name           = "st7789",
-           .of_match_table = st7789_of_match,
-       },
-       .probe    = st7789_probe,
-       .remove   = st7789_remove,
-       .id_table = st7789_spi_ids,
+   struct fb_fix_screeninfo {
+       uint32_t line_length;
+       uint32_t smem_len;
    };
 
-   /* module_spi_driver() expands to module_init() + module_exit() that call
-    * spi_register_driver() and spi_unregister_driver() respectively.
-    * It saves writing the boilerplate init/exit functions manually. */
-   module_spi_driver(st7789_driver);
+   #endif /* LKSS_ST7789_H */
 
-   MODULE_AUTHOR("LKSS Lab Team");
-   MODULE_DESCRIPTION("Minimal ST7789 SPI display driver for LKSS Day 3 lab");
-   MODULE_LICENSE("GPL v2");
+Minimal Usage Example
+^^^^^^^^^^^^^^^^^^^^^^
+
+.. code-block:: c
+
+   #include <fcntl.h>
+   #include <sys/mman.h>
+   #include <sys/ioctl.h>
+   #include <stdint.h>
+   #include "lkss_st7789.h"
+
+   int main(void)
+   {
+       int fd = open("/dev/st7789", O_RDWR);
+       uint16_t *fb = mmap(NULL, ST7789_FBSIZE,
+                           PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+
+       /* Paint the screen solid red */
+       for (int i = 0; i < ST7789_WIDTH * ST7789_HEIGHT; i++)
+           fb[i] = 0xF800;
+
+       /* Flush to the display */
+       ioctl(fd, ST7789_FLUSH);
+
+       munmap(fb, ST7789_FBSIZE);
+       close(fd);
+       return 0;
+   }
+
+.. note::
+
+   **Why vmalloc_user() and not vzalloc()?**
+
+   The kernel's ``remap_vmalloc_range()`` function (used in the mmap handler)
+   checks that the vmalloc area has the ``VM_USERMAP`` flag set.  Only
+   ``vmalloc_user()`` sets this flag.  Using ``vzalloc()`` instead will cause
+   ``mmap()`` to fail with ``EINVAL`` at the line:
+
+   .. code-block:: c
+
+      if (!(area->flags & (VM_USERMAP | VM_DMA_COHERENT)))
+          return -EINVAL;   /* mm/vmalloc.c: remap_vmalloc_range_partial */
+
+   Always use ``vmalloc_user(priv->fbsize)`` for the framebuffer allocation.
+
+----
+
+Lab Exercises – Kernel Driver
+-------------------------------
+
+.. note::
+
+   **Setup before starting:**
+
+   - Skeleton: ``drivers/lkss/labs/lab3/lkss_st7789.c``  (TODOs 1–13)
+   - Solution: ``drivers/lkss/labs/lab3/lkss_st7789_sol.c``
+   - Wire the display as described in Part 6 before loading the driver.
+   - Build command::
+
+        make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+             M=drivers/lkss/labs/lab3 -j$(nproc)
+
+   - Copy and load::
+
+        scp drivers/lkss/labs/lab3/lkss_st7789.ko root@<board>:/tmp/
+        insmod /tmp/lkss_st7789.ko
+
+----
+
+Exercise 1 – Wire the Hardware
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Objective**: Connect the ST7789 display module to the i.MX93 FRDM board.
+
+1. Using the wiring table in **Part 6**, connect the 7-pin display module to the
+   EXT2 header (J601) using short jumper wires.
+2. Double-check VCC goes to 3.3 V only.  Connect BLK to 3.3 V for always-on backlight.
+3. The display should power on (backlight on) as soon as 3.3 V is applied,
+   but will show nothing until the driver initializes it.
+
+.. warning::
+
+   Never apply 5 V to VCC or any signal pin.  Doing so will permanently destroy
+   the display controller.
 
 ----
 
 Exercise 2 – Add the Device Tree Node
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Objective**: Describe the hardware to the kernel by adding the DT fragment
-from the Theory section.  The kernel cannot bind the driver without a matching
-DT node.
+**Objective**: Describe the hardware to the kernel so the SPI core can match and
+bind the driver.
 
-Sub-tasks:
-
-1. Open the board DTS file:
-
-   .. code-block:: bash
+1. Open the board DTS file::
 
       $EDITOR repos/lkss-linux/arch/arm64/boot/dts/freescale/imx93-11x11-frdm.dts
 
-2. Add the ``&lpspi3`` node and the ``&iomuxc`` ``pinctrl_lpspi3`` group shown
-   in the Theory section (Part 5 – Device Tree).
+2. Add the ``&lpspi3`` and ``&iomuxc`` ``pinctrl_lpspi3`` nodes from **Part 7**.
 
-3. Rebuild only the DTB (do not rebuild the full kernel image):
+3. Rebuild the DTB only (no need to rebuild the kernel image)::
 
-   .. code-block:: bash
-
-      cd repos/lkss-linux
       make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-          freescale/imx93-11x11-frdm.dtb -j$(nproc)
+           freescale/imx93-11x11-frdm.dtb -j$(nproc)
       python3 scripts/lkss.py boot
 
-4. On the board, confirm the SPI device appeared (before the driver is loaded
-   the device node exists but has no bound driver):
-
-   .. code-block:: bash
+4. On the board, verify the SPI device appeared::
 
       ls /sys/bus/spi/devices/
 
-   You should see ``spi3.0`` (bus 3, chip-select 0).
+   Expected: ``spi3.0`` (LPSPI3, chip-select 0).
 
-5. Inspect the device tree at runtime:
-
-   .. code-block:: bash
+5. Inspect the compatible string at runtime::
 
       cat /sys/bus/spi/devices/spi3.0/of_node/compatible
+      # Expected: lkss,st7789
 
-   It should print ``lkss,st7789``.
+**Questions:**
 
-**Questions to answer**:
-
-1. What would happen if you misspelled the ``compatible`` string in the DT node
-   (e.g. ``"lkss,st7790"`` instead of ``"lkss,st7789"``)?
-2. Why is ``reg = <0>`` in the DT node?  What would ``reg = <1>`` mean?
-3. What does the iomux pad config value ``0x31e`` configure?  Look up the
-   i.MX93 reference manual (IOMUXC chapter) or the imx93-pinfunc.h header.
+1. What happens if the ``compatible`` string in the DT node is misspelled?
+2. What does ``reg = <0>`` mean?  What would ``reg = <1>`` select?
+3. What does the pad configuration value ``0x31e`` configure on i.MX93?
+   (Hint: see the IOMUXC chapter of the i.MX93 Reference Manual.)
 
 ----
 
-Exercise 3 – Compile and Bind the Driver Skeleton
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Exercise 3 – Build and Load the Driver Skeleton
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Objective**: Enable, build, and load the driver.  Verify in ``dmesg`` that
-``probe()`` is called and that the SPI parameters are correctly negotiated.
+**Objective**: Compile and load the skeleton.  Understand how the SPI core calls
+``probe()``.
 
-Sub-tasks:
+1. Enable the driver::
 
-1. Enable the driver in menuconfig:
-
-   .. code-block:: bash
-
-      cd repos/lkss-linux
       make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- menuconfig
-      # Navigate to: Device Drivers -> LKSS Labs -> Lab 3: ST7789 display
+      # Device Drivers → LKSS Labs → Lab 3: ST7789 SPI display
 
-2. Build the kernel module:
-
-   .. code-block:: bash
+2. Build::
 
       make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-          M=drivers/lkss/labs/lab3 -j$(nproc)
+           M=drivers/lkss/labs/lab3 -j$(nproc)
 
-3. Copy the module to the board and load it:
+3. Copy to board and load::
 
-   .. code-block:: bash
+      insmod /tmp/lkss_st7789.ko
+      dmesg | grep -i st7789
 
-      # Copy to board (adjust IP/path for your setup)
-      scp drivers/lkss/labs/lab3/st7789.ko root@<board_ip>:/tmp/
+4. Expected output — ``probe()`` is called but returns immediately because
+   ``TODO 3`` (init_display) returns ``-EOPNOTSUPP``::
 
-      # On the board:
-      insmod /tmp/st7789.ko
+      [  xx.xx] spi3.0: ST7789 probe: speed=40000000 Hz mode=0x00
+      [  xx.xx] spi3.0: display init failed: -95
 
-4. Check ``dmesg`` for the probe log line:
+   This is **expected** — the skeleton stubs return ``-EOPNOTSUPP`` (-95) until
+   you implement each TODO.
 
-   .. code-block:: bash
+**Questions:**
 
-      dmesg | grep st7789
-
-   Expected output (speed and mode may vary):
-
-   .. code-block:: text
-
-      [   xx.xxxxxx] spi3.0: ST7789 probe: speed=40000000 Hz mode=0x00
-      [   xx.xxxxxx] spi3.0: ST7789 240x240 display initialized successfully
-
-5. The display backlight should turn on and the demo pattern should appear.
-
-**Questions to answer**:
-
-1. What is the probe call stack?  Use ``echo 1 > /sys/bus/spi/drivers_probe``
-   or check ``/proc/kallsyms``.  Which SPI core function calls your probe?
-2. What would the kernel print if ``spi_setup()`` fails?
+1. Which SPI core function calls your ``probe()``?  Look at ``/proc/kallsyms``
+   or the kernel source in ``drivers/spi/spi.c``.
+2. What does ``module_spi_driver()`` expand to?
 
 ----
 
-Exercise 4 – Understand write_cmd and write_data
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-**Objective**: Trace a complete SPI transaction on the oscilloscope (or by
-reading the code carefully) to understand exactly what happens on the wire when
-``st7789_write_cmd(priv, ST7789_CASET)`` is called.
-
-Sub-tasks:
-
-1. Read the implementation of ``st7789_write_cmd()`` and ``st7789_write_data()``
-   in the driver.  Draw a timing diagram (on paper) showing:
-
-   - CS# level
-   - DCX level
-   - MOSI bytes
-
-   for the following sequence::
-
-       st7789_write_cmd(priv, 0x2A);                      /* CASET */
-       u8 col[] = { 0x00, 0x00, 0x00, 0xEF };
-       st7789_write_data(priv, col, 4);
-
-2. Modify ``st7789_write_cmd()`` to print the command byte via ``dev_dbg()``.
-   Recompile and enable dynamic debug:
-
-   .. code-block:: bash
-
-      echo "module st7789 +p" > /sys/kernel/debug/dynamic_debug/control
-      insmod /tmp/st7789.ko
-
-   Observe the initialization command sequence in ``dmesg``.
-
-3. Compare your implementation to ``fbtft_write_spi()`` in:
-   ``repos/lkss-linux/drivers/staging/fbtft/fbtft-bus.c``
-
-   What additional handling does the staging driver perform that our minimal
-   driver skips?
-
-**Questions to answer**:
-
-1. The ST7789 requires DCX to be stable for the *entire* SPI byte transfer.
-   What would happen if we toggled DCX in the *middle* of a byte?
-2. Why does ``spi_write()`` block (synchronous) rather than returning
-   immediately?  When would you use ``spi_async()`` instead?
-
-----
-
-Exercise 5 – Experiment with Colors and Patterns
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-**Objective**: Solidify understanding of the RGB565 pixel format and the
-address window mechanism by writing small test patterns.
-
-Sub-tasks:
-
-1. Modify ``st7789_demo()`` to fill the display with the following colors
-   one by one (add a 500 ms pause between each):
-
-   .. list-table::
-      :header-rows: 1
-      :widths: 25 25 50
-
-      * - Color name
-        - RGB565 value
-        - Encoding
-      * - Red
-        - 0xF800
-        - R=31, G=0,  B=0
-      * - Green
-        - 0x07E0
-        - R=0,  G=63, B=0
-      * - Blue
-        - 0x001F
-        - R=0,  G=0,  B=31
-      * - White
-        - 0xFFFF
-        - R=31, G=63, B=31
-      * - Black
-        - 0x0000
-        - R=0,  G=0,  B=0
-      * - Yellow
-        - 0xFFE0
-        - R=31, G=63, B=0
-      * - Cyan
-        - 0x07FF
-        - R=0,  G=63, B=31
-      * - Magenta
-        - 0xF81F
-        - R=31, G=0,  B=31
-
-2. Implement a function ``st7789_checkerboard(priv, tile_size)`` that draws
-   an alternating black/white checkerboard with each tile being
-   ``tile_size × tile_size`` pixels.  Use ``st7789_fill_rect()`` inside a
-   nested loop.
-
-3. Implement a function ``st7789_gradient(priv)`` that fills the display
-   with a horizontal gradient from black (left) to red (right).  For each
-   column ``x`` (0..239) draw a 1-pixel-wide vertical strip with color:
-   ``0xF800 * x / 239`` (scale the red component).
-
-**Questions to answer**:
-
-1. RGB565 uses 5 bits for red, 6 bits for green, 5 bits for blue.  Why does
-   green get the extra bit?
-2. What is the maximum number of colors representable in RGB565?
-
-----
-
-Exercise 6 – Drawing Lines and Circles
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-**Objective**: Test the Bresenham line and midpoint circle algorithms and
-understand how they work.
-
-Sub-tasks:
-
-1. Call ``st7789_draw_line(priv, 0, 0, 239, 239, 0xFFFF)`` (white diagonal).
-   Then add::
-
-       st7789_draw_line(priv, 239, 0, 0, 239, 0x07E0);  /* green anti-diagonal */
-
-   Observe the two lines cross in the center.
-
-2. Draw five concentric circle outlines centered at (120, 120) with radii
-   10, 30, 50, 70, 90, each in a different color.
-
-3. Draw a filled circle centered at (60, 60) with radius 50.  Then draw
-   a circle outline at the same center with the same radius in a contrasting
-   color.  Observe that the outline lies exactly on the boundary of the
-   filled area.
-
-4. **Challenge**: implement ``st7789_draw_rect_outline(priv, x, y, w, h, color)``
-   that draws only the border of a rectangle (four lines) without filling it.
-   Use ``st7789_fill_rect()`` with height=1 or width=1 for each side.
-
-**Questions to answer**:
-
-1. The Bresenham algorithm uses the variable ``d`` (decision parameter).
-   What is its geometric meaning?
-2. How many SPI transactions does drawing one pixel with ``st7789_draw_pixel()``
-   require?  What would you change to make pixel-by-pixel drawing faster?
-
-----
-
-Exercise 7 – Performance Measurement and Optimization
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-**Objective**: Measure the time it takes to fill the screen and understand
-the SPI throughput bottleneck.
-
-Sub-tasks:
-
-1. On the board, measure the time to execute ``st7789_fill(priv, 0xF800)``
-   using kernel timestamps:
-
-   .. code-block:: c
-
-      ktime_t t0, t1;
-      t0 = ktime_get();
-      st7789_fill(priv, 0xF800);
-      t1 = ktime_get();
-      dev_info(&spi->dev, "fill time: %lld us\n",
-               ktime_to_us(ktime_sub(t1, t0)));
-
-2. Calculate the theoretical minimum fill time:
-
-   - Pixel count: 240 × 240 = 57,600 pixels
-   - Bytes to transfer: 57,600 × 2 = 115,200 bytes
-   - SPI clock: 40 MHz = 40,000,000 bits/s = 5,000,000 bytes/s
-   - Minimum time: 115,200 / 5,000,000 = **23.04 ms**
-
-   How close is your measured time to this theoretical minimum?  What
-   accounts for the difference?
-
-3. The current implementation sends one scanline (480 bytes) per SPI
-   transaction for a total of 240 transactions per ``fill()``.  Modify
-   ``st7789_fill()`` to send all 115,200 bytes in a **single** SPI
-   transaction.  Measure the time again.  Is it faster?
-
-   .. code-block:: c
-
-      /* Hint: allocate the full framebuffer at once */
-      u8 *fb = kmalloc(priv->width * priv->height * 2, GFP_KERNEL);
-
-**Questions to answer**:
-
-1. What limits you from using a clock faster than 40 MHz on this hardware?
-2. The ``spi_write()`` call copies data through the kernel SPI layer.
-   How would you use DMA to avoid CPU involvement in the data transfer?
-
-----
-
-Exercise 8 – Stretch Goal: Framebuffer Device
+Exercise 4 – TODO 1: Low-level SPI Primitives
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Objective**: Register a Linux ``fbdev`` framebuffer device so that userspace
-programs can write to the display via ``/dev/fb0`` without knowing anything
-about the ST7789 or SPI.
+**Reference**: Theory Part 5.1.
 
-Sub-tasks:
+Open ``lkss_st7789.c`` and find the ``TODO 1`` comment blocks.  Implement:
 
-1. Add the necessary includes and a shadow buffer to ``st7789_priv``:
+- ``st7789_write_cmd()``: drive DCX low, then call ``spi_write()`` for 1 byte.
+- ``st7789_write_data()``: drive DCX high, then call ``spi_write()`` for ``len`` bytes.
 
-   .. code-block:: c
+``st7789_write_data_byte()`` is already provided as an inline wrapper — do not
+change it.
 
-      #include <linux/fb.h>
-      struct st7789_priv {
-          /* ... existing fields ... */
-          struct fb_info *fb_info;   /* fbdev instance */
-          u8             *fb_buf;    /* shadow frame buffer in RAM */
-          struct delayed_work flush_work; /* periodic SPI flush */
-      };
+**Test**: Rebuild and reload.  ``dmesg`` should now advance past write_cmd/write_data
+and fail at a later stage (TODO 2 or TODO 3).
 
-2. In ``probe()``, allocate the shadow buffer and register the framebuffer:
+**Questions:**
 
-   .. code-block:: c
-
-      priv->fb_buf = devm_kzalloc(&spi->dev,
-                                   ST7789_WIDTH * ST7789_HEIGHT * 2,
-                                   GFP_KERNEL);
-
-      priv->fb_info = framebuffer_alloc(0, &spi->dev);
-      /* Fill in var (xres, yres, bits_per_pixel, color bitfields) and
-       * fix (smem_start, smem_len, line_length) then call
-       * register_framebuffer(priv->fb_info). */
-
-3. Implement a ``delayed_work`` function that calls ``st7789_set_addr_win()``
-   for the full screen and then sends the entire shadow buffer over SPI every
-   33 ms (approximately 30 fps).
-
-4. On the board, test the framebuffer:
-
-   .. code-block:: bash
-
-      # Display information about the framebuffer
-      fbset -i -fb /dev/fb0
-
-      # Fill with solid red (2 bytes per pixel: 0xf8 0x00 = red in RGB565)
-      python3 -c "import sys; sys.stdout.buffer.write(b'\xf8\x00' * 240 * 240)" \
-          > /dev/fb0
-
-      # Run a framebuffer demo application from the demo/ directory
-      ./demo/fb_demo
+1. What would happen if DCX toggled in the middle of a multi-byte SPI transfer?
+2. ``spi_write()`` is synchronous — it blocks until the transfer completes.
+   When would you use ``spi_async()`` instead?
 
 ----
 
-Cheatsheet: SPI and ST7789 Quick Reference
--------------------------------------------
+Exercise 5 – TODO 2: Hardware Reset
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. list-table::
+**Reference**: Theory Part 5.2.
+
+Implement ``st7789_hw_reset()``:
+
+1. Write logical 1 to the reset GPIO (asserts the active-low RESX pin LOW).
+2. Sleep 20 ms (≥ 15 ms minimum from the datasheet).
+3. Write logical 0 (deasserts RESX to HIGH).
+4. Sleep 150 ms (≥ 120 ms minimum before the first command).
+
+**Test**: If you have an oscilloscope, probe J601 pin 32.  On ``insmod`` you
+should see a ~20 ms LOW pulse followed by the line going HIGH.
+
+**Questions:**
+
+1. Why does ``gpiod_set_value(priv->reset, 1)`` drive the pin **LOW**?
+   What role does ``GPIO_ACTIVE_LOW`` in the device tree play?
+
+----
+
+Exercise 6 – TODO 3: Initialization Sequence
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Reference**: Theory Part 3, Essential Commands table.
+
+Implement ``st7789_init_display()``.  You can start with the **minimal 6-command
+sequence** — the display will turn on and show something:
+
+.. code-block:: c
+
+   st7789_write_cmd(priv, ST7789_SLPOUT);    /* exit sleep; wait 500ms */
+   msleep(500);
+   st7789_write_cmd(priv, ST7789_COLMOD);    /* pixel format           */
+   st7789_write_data_byte(priv, 0x55);       /* 0x55 = RGB565          */
+   st7789_write_cmd(priv, ST7789_MADCTL);    /* memory access control  */
+   st7789_write_data_byte(priv, 0x00);       /* normal orientation     */
+   st7789_write_cmd(priv, ST7789_INVON);     /* inversion on           */
+   st7789_write_cmd(priv, ST7789_NORON);     /* normal display mode    */
+   st7789_write_cmd(priv, ST7789_DISPON);    /* display on; wait 100ms */
+   msleep(100);
+
+For correct colors and contrast, the solution adds power/VCOM/gamma registers
+matching the ``HSD20_IPS`` profile from ``drivers/staging/fbtft/fb_st7789v.c``.
+Consult ``lkss_st7789_sol.c`` for the full sequence after your basic version works.
+
+**Test**: After ``insmod``, the display should turn on.  If TODO 4 (fill) is not
+yet implemented the screen may show garbage or be white — that is normal.
+
+**Questions:**
+
+1. What would the display look like without ``INVON``?  Try removing it.
+2. What does ``COLMOD 0x55`` configure?  What value would you use for 18 bpp?
+
+----
+
+Exercise 7 – TODO 4: Address Window and Fill
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Reference**: Theory Part 5.3 (set_addr_win) and Part 5.4 (fill).
+
+Implement both functions in the ``TODO 4`` block:
+
+1. ``st7789_set_addr_win()``: build the 4-byte big-endian arrays for CASET and
+   RASET, send CASET + data, RASET + data, then RAMWR.
+2. ``st7789_fill()``: call ``set_addr_win`` for the full panel, allocate a
+   scanline buffer with ``kmalloc``, fill it with the repeated color, loop
+   sending it ``height`` times, then ``kfree`` the buffer.
+
+**Test**: In ``st7789_demo()``, call::
+
+    st7789_fill(priv, 0xF800);   /* solid red   */
+    msleep(1000);
+    st7789_fill(priv, 0x07E0);   /* solid green */
+    msleep(1000);
+    st7789_fill(priv, 0x001F);   /* solid blue  */
+
+The display should flash red, green, blue in sequence.
+
+**Questions:**
+
+1. What would happen if you sent the CASET bytes in little-endian order?
+2. Why allocate one scanline buffer and loop, rather than one pixel at a time?
+   How many SPI transactions does each approach use for a full-screen fill?
+
+----
+
+Exercise 8 – TODO 5: Filled Rectangle
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Reference**: Theory Part 5.6.
+
+Implement ``st7789_fill_rect()``.  Key points:
+
+- Clamp: if ``x + w > priv->width``, reduce ``w`` to ``priv->width - x``.
+  Same for height.  Return 0 silently if ``x`` or ``y`` is already out of range.
+- Set the address window to the rectangle, allocate one row buffer of ``w*2``
+  bytes, send it ``h`` times.
+
+**Test**: Draw a red border::
+
+    st7789_fill_rect(priv,   0,   0, 240,   4, 0xF800);  /* top    */
+    st7789_fill_rect(priv,   0, 236, 240,   4, 0xF800);  /* bottom */
+    st7789_fill_rect(priv,   0,   0,   4, 240, 0xF800);  /* left   */
+    st7789_fill_rect(priv, 236,   0,   4, 240, 0xF800);  /* right  */
+
+**Questions:**
+
+1. What happens if you skip the coordinate clamping and the caller passes
+   ``x=230, w=20`` on a 240-pixel-wide panel?
+
+----
+
+Exercise 9 – TODO 6: Single Pixel
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Reference**: Theory Part 5.5.
+
+Implement ``st7789_draw_pixel()``:
+
+1. Return 0 immediately if ``x >= priv->width || y >= priv->height``.
+2. Build a 2-byte array: ``{color >> 8, color & 0xff}`` (big-endian).
+3. Call ``st7789_set_addr_win(x, y, x, y)`` then ``st7789_write_data(pixel, 2)``.
+
+**Test**: Draw a 10×10 grid of dots::
+
+    for (int row = 0; row < 24; row++)
+        for (int col = 0; col < 24; col++)
+            st7789_draw_pixel(priv, col*10, row*10, 0xFFFF);
+
+**Questions:**
+
+1. Each ``draw_pixel()`` call issues how many SPI transactions?
+   (Hint: count the calls to ``spi_write()`` inside one ``draw_pixel()``.)
+2. Drawing 57,600 pixels one at a time: how many SPI transactions total?
+   Why is ``st7789_fill()`` so much more efficient?
+
+----
+
+Exercise 10 – TODO 7: Line Drawing
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Reference**: Theory Part 5.7 (Bresenham algorithm).
+
+Implement ``st7789_draw_line()``.  Follow the algorithm exactly as described:
+initialize ``dx``, ``dy``, ``sx``, ``sy``, ``err`` from the endpoint coordinates,
+then loop: plot pixel, check termination, compute ``e2``, step x and/or y.
+
+**Test**: Draw two crossing diagonals::
+
+    st7789_draw_line(priv,   0,   0, 239, 239, 0xFFFF);  /* white  \  */
+    st7789_draw_line(priv, 239,   0,   0, 239, 0x07E0);  /* green  /  */
+
+Then add horizontal and vertical lines::
+
+    st7789_draw_line(priv, 0, 120, 239, 120, 0xF800);  /* horizontal */
+    st7789_draw_line(priv, 120, 0, 120, 239, 0x001F);  /* vertical   */
+
+**Questions:**
+
+1. Manually trace the algorithm for the line from (0,0) to (3,2).
+   After the first two iterations, what are the values of ``err``, ``x0``, ``y0``?
+2. What is the geometric meaning of the variable ``e2``?
+
+----
+
+Exercise 11 – TODO 8: Circle Outline
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Reference**: Theory Part 5.8 (midpoint algorithm).
+
+Implement ``st7789_draw_circle()``.  Use the ``PLOT`` macro pattern from the
+reference implementation to plot all 8 symmetric points per iteration.  Start
+with ``x=0, y=r, d=1-r`` and loop while ``x <= y``.
+
+**Test**: Draw five concentric circles::
+
+    st7789_draw_circle(priv, 120, 120, 20, 0xF800);
+    st7789_draw_circle(priv, 120, 120, 40, 0xFFE0);
+    st7789_draw_circle(priv, 120, 120, 60, 0x07E0);
+    st7789_draw_circle(priv, 120, 120, 80, 0x07FF);
+    st7789_draw_circle(priv, 120, 120, 100, 0xF81F);
+
+**Questions:**
+
+1. Why does the algorithm plot 8 points per iteration?
+   Which 8-fold symmetry of a circle does this exploit?
+2. What is the geometric meaning of the decision variable ``d``?
+
+----
+
+Exercise 12 – TODO 9: Filled Circle
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Reference**: Theory Part 5.9 (chord fill).
+
+Implement ``st7789_fill_circle()``.  Iterate ``dy`` from ``-r`` to ``+r``.
+For each ``dy`` compute ``dx = int_sqrt(r*r - dy*dy)`` and call
+``st7789_fill_rect(cx - dx, cy + dy, 2*dx + 1, 1, color)``.
+
+**Test**: Overlay a filled circle with its outline in a contrasting color::
+
+    st7789_fill(priv, 0x0000);                           /* black background */
+    st7789_fill_circle(priv, 120, 120, 80, 0x07E0);     /* green fill       */
+    st7789_draw_circle(priv, 120, 120, 80, 0xFFFF);     /* white outline    */
+
+The white outline should sit exactly on the boundary of the green fill.
+
+**Questions:**
+
+1. For a circle of radius 50, how many ``fill_rect()`` calls does
+   ``fill_circle()`` make?
+2. Why does ``fill_circle`` use ``fill_rect`` with ``h=1`` rather than
+   calling ``draw_pixel`` for each point?
+
+----
+
+Exercise 13 – TODO 10: Demo Pattern
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Objective**: Tie all primitives together in a composite test image that visually
+confirms every function works.
+
+Implement ``st7789_demo()`` with these steps in order:
+
+1. ``st7789_fill(priv, 0x0000)`` — black background; pause 500 ms.
+2. Four ``st7789_fill_rect()`` calls — 4-pixel red border on all four sides.
+3. ``st7789_fill_circle(priv, 60, 60, 50, 0x07E0)`` — green filled circle.
+4. ``st7789_fill_rect(priv, 130, 130, 100, 100, 0x001F)`` — blue square.
+5. ``st7789_draw_line(priv, 5, 5, 234, 234, 0xFFFF)`` — white diagonal.
+6. ``st7789_draw_circle(priv, 120, 120, 40, 0xFFE0)`` — yellow circle outline.
+
+**Test**: ``insmod`` the module.  The display should show the complete test pattern.
+If any primitive is broken, the pattern will show clearly which one.
+
+**This completes the kernel driver exercises.**
+
+----
+
+Lab Exercises – Userspace Interface
+--------------------------------------
+
+.. note::
+
+   **Prerequisites**: Exercises 1–13 complete (working kernel driver with all
+   drawing primitives).
+
+   The solution driver ``lkss_st7789_sol.c`` already implements TODOs 11–13.
+   You can use the solution module while working on userspace exercises, then
+   add the miscdevice to your own driver afterwards.
+
+   Load the solution::
+
+      insmod /tmp/lkss_st7789_sol.ko
+      ls -la /dev/st7789     # should exist after insmod
+
+----
+
+Exercise 14 – TODO 11: Add Miscdevice Fields to the Driver
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Objective**: Extend the driver private state to hold the framebuffer and
+miscdevice.  No functional change yet — just structure preparation.
+
+Open ``lkss_st7789.c`` and find ``TODO 11``.
+
+1. Add the following includes at the top of the file:
+
+   .. code-block:: c
+
+      #include <linux/miscdevice.h>
+      #include <linux/fs.h>
+      #include <linux/mm.h>
+      #include <linux/vmalloc.h>
+      #include <linux/mutex.h>
+      #include <linux/uaccess.h>
+      #include <linux/ioctl.h>
+
+2. Add the ioctl define (before the struct):
+
+   .. code-block:: c
+
+      #define ST7789_IOC_MAGIC  'V'
+      #define ST7789_FLUSH      _IO(ST7789_IOC_MAGIC, 0)
+
+3. Extend ``struct st7789_priv``:
+
+   .. code-block:: c
+
+      u8                 *fbuf;    /* vmalloc_user framebuffer (LE RGB565) */
+      size_t              fbsize;  /* = width * height * 2                 */
+      struct miscdevice   misc;    /* /dev/st7789 character device         */
+      struct mutex        lock;    /* serialises SPI access from ioctl     */
+
+**Test**: The module should still build and load without errors.
+
+----
+
+Exercise 15 – TODO 12: Implement File Operations
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Objective**: Implement the kernel-side file operations that userspace will call.
+
+Find ``TODO 12`` in the skeleton.  Implement the following four functions:
+
+**st7789_fb_open** — minimal, just returns 0::
+
+    static int st7789_fb_open(struct inode *inode, struct file *file)
+    {
+        return 0;
+    }
+
+**st7789_fb_write** — copy user data into ``fbuf`` at ``*ppos``::
+
+    static ssize_t st7789_fb_write(struct file *file, const char __user *buf,
+                                   size_t count, loff_t *ppos)
+
+Use ``container_of(file->private_data, struct st7789_priv, misc)`` to get
+``priv``.  Clamp to ``fbsize``, use ``copy_from_user()``, advance ``*ppos``.
+
+**st7789_fb_ioctl** — handle ``ST7789_FLUSH``, return ``-ENOTTY`` for anything else::
+
+    static long st7789_fb_ioctl(struct file *file, unsigned int cmd,
+                                unsigned long arg)
+
+Acquire ``priv->lock`` around the call to ``st7789_flush()``.
+
+**st7789_fb_mmap** — map ``priv->fbuf`` to userspace::
+
+    static int st7789_fb_mmap(struct file *file, struct vm_area_struct *vma)
+
+Check ``vma->vm_pgoff == 0``, then call ``remap_vmalloc_range(vma, priv->fbuf, 0)``.
+Do **not** add a size check — the kernel rounds the mmap request up to a page
+boundary, which will be larger than ``fbsize``, causing a false ``-EINVAL``.
+
+**st7789_fops** — assemble the ops struct::
+
+    static const struct file_operations st7789_fops = {
+        .owner          = THIS_MODULE,
+        .open           = st7789_fb_open,
+        .write          = st7789_fb_write,
+        .unlocked_ioctl = st7789_fb_ioctl,
+        .mmap           = st7789_fb_mmap,
+        .llseek         = default_llseek,
+    };
+
+Also implement ``st7789_flush()`` from **Theory Part 5.10**.
+
+**Test**: The module should build cleanly.  Functional test in Exercise 16.
+
+----
+
+Exercise 16 – TODO 13: Probe Registration and Remove Cleanup
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Objective**: Allocate the framebuffer, register the miscdevice in ``probe()``,
+and clean up in ``remove()``.
+
+Find ``TODO 13`` in ``st7789_probe()``.  After the ``st7789_demo()`` call add:
+
+.. code-block:: c
+
+   mutex_init(&priv->lock);
+   priv->fbsize = (size_t)priv->width * priv->height * 2;
+   priv->fbuf   = vmalloc_user(priv->fbsize);   /* NOT vzalloc! */
+   if (!priv->fbuf)
+       return -ENOMEM;
+
+   priv->misc.minor = MISC_DYNAMIC_MINOR;
+   priv->misc.name  = "st7789";
+   priv->misc.fops  = &st7789_fops;
+   ret = misc_register(&priv->misc);
+   if (ret) {
+       dev_err(&spi->dev, "misc_register failed: %d\n", ret);
+       vfree(priv->fbuf);
+       return ret;
+   }
+   dev_info(&spi->dev, "ST7789 ready at /dev/st7789\n");
+
+In ``st7789_remove()``, before ``st7789_write_cmd(priv, ST7789_DISPOFF)``, add:
+
+.. code-block:: c
+
+   misc_deregister(&priv->misc);
+   vfree(priv->fbuf);
+
+.. warning::
+
+   Use ``vmalloc_user()`` not ``vzalloc()``.  ``remap_vmalloc_range()`` (called in
+   the mmap handler) requires the ``VM_USERMAP`` flag, which only ``vmalloc_user()``
+   sets.  Using ``vzalloc()`` causes ``mmap()`` to fail with ``EINVAL``.
+
+**Test**::
+
+   insmod /tmp/lkss_st7789.ko
+   ls -la /dev/st7789        # should show a character device
+   dmesg | tail -3           # should end with "ST7789 ready at /dev/st7789"
+
+----
+
+Exercise 17 – Userspace: fb_test_st7789 Skeleton
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Objective**: Implement the userspace framebuffer helper functions in the
+provided skeleton.
+
+Open ``demo/fb_test_st7789_skel.c``.  The file contains three TODO blocks:
+
+**TODO U1 – Open device and mmap framebuffer**
+
+In ``fb_open()``, replace the ioctl calls with direct constant population:
+
+.. code-block:: c
+
+   ctx->fd = open(dev, O_RDWR);
+   if (ctx->fd < 0) { perror("open"); return -1; }
+   ctx->vinfo.xres           = ST7789_WIDTH;
+   ctx->vinfo.yres           = ST7789_HEIGHT;
+   ctx->vinfo.bits_per_pixel = ST7789_BPP;
+   ctx->finfo.line_length    = ST7789_STRIDE;
+   ctx->finfo.smem_len       = ST7789_FBSIZE;
+   ctx->size = ST7789_FBSIZE;
+   ctx->buf  = mmap(NULL, ctx->size, PROT_READ|PROT_WRITE, MAP_SHARED,
+                    ctx->fd, 0);
+   if (ctx->buf == MAP_FAILED) { perror("mmap"); close(ctx->fd); return -1; }
+   return 0;
+
+**TODO U2 – Implement flush**
+
+In ``flush()``:
+
+.. code-block:: c
+
+   static void flush(struct fb_ctx *ctx)
+   {
+       ioctl(ctx->fd, ST7789_FLUSH);
+   }
+
+**TODO U3 – Add a test scene**
+
+Add one test scene in ``main()`` that exercises ``pixel()`` and ``fill_rect()``:
+for example, a checkerboard of 20×20 squares alternating black and white.
+
+**Cross-compile and run**::
+
+   aarch64-linux-gnu-gcc -O2 -o fb_test_st7789_skel \
+       demo/fb_test_st7789_skel.c
+   # copy to board then:
+   ./fb_test_st7789_skel /dev/st7789
+
+**Compare** your implementation to the solution ``demo/fb_test_st7789.c``.
+
+**Questions:**
+
+1. Why does ``fb_open()`` no longer call ``ioctl(FBIOGET_VSCREENINFO)``?
+2. The original framebuffer demos used ``FBIOPAN_DISPLAY`` with a
+   ``struct fb_var_screeninfo`` argument.  Why does our ``ST7789_FLUSH``
+   take no argument?
+
+----
+
+Exercise 18 – Userspace: Run the Demo Suite
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Objective**: Build and run all ``*_st7789`` demo programs.  Each demo is a
+variant of the original framebuffer demos adapted to use ``lkss_st7789.h`` and
+``/dev/st7789``.
+
+1. Build all demos::
+
+      cd demo && make
+      # Builds: fb_test_st7789, pong_st7789, snake_auto_st7789,
+      #         watch_st7789, weather_st7789, sensors_st7789, fb_demo_st7789
+
+2. Copy to the board and run each::
+
+      ./pong_st7789           # auto-play Pong, AI vs AI
+      ./snake_auto_st7789     # self-playing Snake
+      ./watch_st7789          # digital clock face
+      ./fb_demo_st7789        # plasma/starfield/fire animations
+      ./sensors_st7789        # BME280 live sensor readout (requires sensor)
+
+3. Observe that the demos run entirely from userspace: the display updates are
+   driven by ``mmap`` pixel writes followed by ``ioctl(ST7789_FLUSH)``.
+
+4. Try running two demos simultaneously in the background::
+
+      ./fb_demo_st7789 &
+      ./watch_st7789 &
+
+   Observe what happens (both fight over ``/dev/st7789``).
+
+**Questions:**
+
+1. What is the effective frame rate of ``pong_st7789``?  Each frame involves
+   one ``mmap`` write pass and one ``ioctl(ST7789_FLUSH)``.  What limits
+   the frame rate?
+2. The kernel flush byteswaps 115,200 bytes per call.  At 30 fps, what is
+   the CPU bandwidth consumed just by byteswapping?
+3. How would you eliminate the byteswap?  (Hint: think about how you store
+   the pixel in userspace, or look at the MADCTL ``BGR`` bit.)
+
+----
+
+Cheatsheet
+----------
+
+.. list-table:: Key Kernel Functions
    :header-rows: 1
-   :widths: 45 55
+   :widths: 40 60
 
    * - Function / Macro
      - Purpose
    * - ``spi_write(spi, buf, len)``
-     - Synchronous SPI write; blocks until complete
-   * - ``spi_sync(spi, &msg)``
-     - Submit a full ``spi_message`` synchronously
+     - Synchronous SPI write; blocks until complete.
    * - ``spi_setup(spi)``
-     - Apply mode and speed settings to the SPI controller
+     - Apply mode and speed settings to the SPI controller.
    * - ``devm_gpiod_get(dev, con_id, flags)``
-     - Obtain a GPIO descriptor from a DT property (``con_id-gpios``)
+     - Obtain a GPIO descriptor from the ``<con_id>-gpios`` DT property.
    * - ``gpiod_set_value(desc, val)``
-     - Drive the GPIO; val is logical (respects active-low polarity)
+     - Drive GPIO; ``val`` is logical (respects active-low polarity).
    * - ``msleep(ms)``
-     - Sleep for ``ms`` milliseconds (process context only)
+     - Sleep for ``ms`` milliseconds (process context only).
+   * - ``kmalloc(size, GFP_KERNEL)``
+     - Allocate physically contiguous kernel memory.
+   * - ``kfree(ptr)``
+     - Free ``kmalloc``'d memory.
+   * - ``vmalloc_user(size)``
+     - Allocate virtually contiguous memory with ``VM_USERMAP`` flag set.
+       Required for ``remap_vmalloc_range()``.
+   * - ``vfree(ptr)``
+     - Free ``vmalloc_user``'d memory.
+   * - ``int_sqrt(x)``
+     - Integer square root (from ``<linux/kernel.h>``).
    * - ``module_spi_driver(drv)``
-     - Register + unregister ``spi_driver`` in one macro
+     - Register + unregister ``spi_driver`` in one macro.
    * - ``spi_set_drvdata(spi, data)``
-     - Store driver-private pointer in the SPI device
+     - Store driver-private pointer in the SPI device.
    * - ``spi_get_drvdata(spi)``
-     - Retrieve the driver-private pointer
+     - Retrieve the driver-private pointer.
    * - ``devm_kzalloc(dev, size, flags)``
-     - Allocate zero-initialised memory tied to device lifetime
+     - Zero-initialised allocation tied to device lifetime.
+   * - ``misc_register(misc)``
+     - Register a miscdevice (creates ``/dev/<name>``).
+   * - ``misc_deregister(misc)``
+     - Unregister and remove the device node.
+   * - ``remap_vmalloc_range(vma, addr, pgoff)``
+     - Map vmalloc memory into a user VMA.  Requires ``VM_USERMAP``.
+   * - ``container_of(ptr, type, member)``
+     - Derive a pointer to the containing struct from a member pointer.
+   * - ``copy_from_user(dst, src, n)``
+     - Copy ``n`` bytes from userspace ``src`` into kernel ``dst``.
 
-.. list-table::
+.. list-table:: ST7789 Commands Quick Reference
    :header-rows: 1
-   :widths: 18 10 72
+   :widths: 14 10 76
 
-   * - ST7789 Command
+   * - Mnemonic
      - Opcode
-     - Quick description
+     - Description
    * - SWRESET
      - 0x01
-     - Software reset; wait 150 ms
+     - Software reset; wait 150 ms.
    * - SLPOUT
      - 0x11
-     - Exit sleep; wait 500 ms
+     - Exit sleep mode; wait 500 ms.
    * - INVON
      - 0x21
-     - Inversion on (needed for most modules)
+     - Display inversion on (required on most ST7789 modules).
    * - DISPON
      - 0x29
-     - Display on; wait 100 ms
+     - Display on; wait 100 ms.
    * - CASET
      - 0x2A
-     - Column window: 4 bytes (x0_H, x0_L, x1_H, x1_L)
+     - Column window: 4 bytes (x0_H, x0_L, x1_H, x1_L), big-endian.
    * - RASET
      - 0x2B
-     - Row window: 4 bytes (y0_H, y0_L, y1_H, y1_L)
+     - Row window: 4 bytes (y0_H, y0_L, y1_H, y1_L), big-endian.
    * - RAMWR
      - 0x2C
-     - Start pixel data; D/C=HIGH, then stream RGB565 bytes
+     - Open pixel data stream; subsequent bytes fill the window.
    * - MADCTL
      - 0x36
-     - Rotation / mirror; 0x00=normal, 0x60=90 deg, 0xC0=180 deg
+     - Rotation/mirror/RGB-BGR; 0x00 = normal.
    * - COLMOD
      - 0x3A
-     - Pixel format; 0x55=RGB565, 0x66=RGB666
+     - Pixel format; 0x55 = RGB565, 0x66 = RGB666.
+   * - DISPOFF
+     - 0x28
+     - Display off (GRAM retained).
+
+.. list-table:: RGB565 Color Constants
+   :header-rows: 1
+   :widths: 20 20 60
+
+   * - Color
+     - Value
+     - Notes
+   * - Black
+     - ``0x0000``
+     - R=0, G=0, B=0
+   * - Red
+     - ``0xF800``
+     - R=31, G=0, B=0
+   * - Green
+     - ``0x07E0``
+     - R=0, G=63, B=0
+   * - Blue
+     - ``0x001F``
+     - R=0, G=0, B=31
+   * - White
+     - ``0xFFFF``
+     - R=31, G=63, B=31
+   * - Yellow
+     - ``0xFFE0``
+     - R=31, G=63, B=0
+   * - Cyan
+     - ``0x07FF``
+     - R=0, G=63, B=31
+   * - Magenta
+     - ``0xF81F``
+     - R=31, G=0, B=31
+
+.. list-table:: Userspace API Summary
+   :header-rows: 1
+   :widths: 35 65
+
+   * - Call
+     - Description
+   * - ``open("/dev/st7789", O_RDWR)``
+     - Open the ST7789 miscdevice.
+   * - ``mmap(NULL, ST7789_FBSIZE, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0)``
+     - Map the framebuffer; write LE RGB565 uint16_t pixels into the result.
+   * - ``ioctl(fd, ST7789_FLUSH)``
+     - Push the framebuffer to the display.  Kernel byteswaps LE→BE.
+   * - ``write(fd, buf, n)``
+     - Write raw RGB565 bytes into the framebuffer at file position.
+   * - ``munmap(buf, ST7789_FBSIZE)``
+     - Release the framebuffer mapping.
+   * - ``close(fd)``
+     - Close the device.
 
 ----
 
@@ -1873,12 +1970,13 @@ Resources
 ---------
 
 - `Linux kernel SPI documentation <https://docs.kernel.org/driver-api/spi.html>`_
-- `ST7789VW datasheet <https://www.waveshare.com/w/upload/a/ad/ST7789VW.pdf>`_ –
+- `ST7789VW datasheet <https://www.waveshare.com/w/upload/a/ad/ST7789VW.pdf>`_ —
   full command reference and initialization guidance
 - Staging driver reference: ``repos/lkss-linux/drivers/staging/fbtft/fb_st7789v.c``
 - `Linux framebuffer API <https://docs.kernel.org/fb/api.html>`_
+- `Linux miscdevice interface <https://docs.kernel.org/driver-api/misc_devices.html>`_
 - `Linux Kernel Labs – SPI <https://linux-kernel-labs.github.io/refs/heads/master/labs/spi.html>`_
-- :ref:`imx93-frdm-ext2-header` – full EXT2 expansion header pin map
-- :ref:`development_board` – FRDM-IMX93 board overview
 - Bresenham, J.E. (1965). "Algorithm for computer control of a digital plotter".
-  IBM Systems Journal, 4(1): 25–30.
+  *IBM Systems Journal*, 4(1): 25–30.
+- :ref:`imx93-frdm-ext2-header` — full EXT2 expansion header pin map
+- :ref:`development_board` — FRDM-IMX93 board overview
