@@ -7,7 +7,7 @@ Day 3 (alternate) – SPI from Scratch: Driving the ST7789 Display
 **Topics**
 
 - SPI bus fundamentals: signals, clock polarity/phase (CPOL/CPHA), chip-select, SPI modes
-- SPI buses on the i.MX93 FRDM board: LPSPI3 controller, EXT2 connector
+- SPI buses on the i.MX93 FRDM board: LPSPI4 controller, EXT2 connector
 - ST7789 TFT controller: architecture, 4-line SPI protocol, command/data distinction
 - RGB565 pixel format: bit layout, byte order, framebuffer memory organisation
 - ST7789 initialization sequence and address window mechanism
@@ -30,6 +30,8 @@ By the end of this lab you will be able to:
 
 Theory
 ------
+
+.. _st7789-part1:
 
 Part 1 – The SPI Bus
 ~~~~~~~~~~~~~~~~~~~~~
@@ -139,11 +141,13 @@ A minimal SPI write transaction for one byte looks like this:
 3. Slave samples each bit on the rising clock edge (Mode 0).
 4. Master drives CS# high — transaction complete.
 
+.. _st7789-part2:
+
 Part 2 – SPI on the i.MX93 FRDM Board
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The NXP i.MX93 SoC integrates several **LPSPI** (Low-Power SPI) controllers.
-**LPSPI3** is routed to the EXT2 expansion header (J601):
+**LPSPI4** is routed to the EXT2 expansion header (J601):
 
 .. list-table::
    :header-rows: 1
@@ -153,27 +157,27 @@ The NXP i.MX93 SoC integrates several **LPSPI** (Low-Power SPI) controllers.
      - Signal
      - SoC Pad
      - GPIO Line
-     - LPSPI3 Function
-   * - 23
+     - LPSPI4 Function
+   * - 16
      - SCK
-     - GPIO_IO11
-     - GPIO2_IO11
-     - LPSPI3_SCK (serial clock)
-   * - 19
+     - GPIO_IO21
+     - GPIO2_IO21
+     - LPSPI4_SCK (serial clock)
+   * - —
      - MOSI
-     - GPIO_IO10
-     - GPIO2_IO10
-     - LPSPI3_SOUT (master data output)
-   * - 21
+     - GPIO_IO20
+     - GPIO2_IO20
+     - LPSPI4_SOUT (master data output; see board schematic for J601 pin)
+   * - (nc)
      - MISO
-     - GPIO_IO09
-     - GPIO2_IO09
-     - LPSPI3_SIN (not connected to ST7789)
-   * - 24
+     - —
+     - —
+     - not connected to ST7789 (write-only display)
+   * - (hw)
      - CS0
-     - GPIO_IO08
-     - GPIO2_IO08
-     - LPSPI3_PCS0 (hardware chip-select, not connected)
+     - —
+     - —
+     - LPSPI4_PCS0 (hardware chip-select; display CS tied to GND on module)
 
 Two additional GPIO lines drive the ST7789 control signals:
 
@@ -186,22 +190,24 @@ Two additional GPIO lines drive the ST7789 control signals:
      - SoC Pad
      - GPIO Line
      - Used For
-   * - 32
+   * - 15
      - RST
-     - GPIO_IO12
-     - GPIO2_IO12
+     - GPIO_IO19
+     - GPIO2_IO19
      - ST7789 hardware reset (RESX), active-low
-   * - 7
+   * - 22
      - D/C
-     - GPIO_IO04
-     - GPIO2_IO04
+     - GPIO_IO13
+     - GPIO2_IO13
      - ST7789 data/command select (DCX), HIGH=data
 
 .. note::
 
    The ST7789 module's CS pin is soldered to GND on the module PCB, so the display
-   is always selected.  LPSPI3_PCS0 (pin 24) is wired by the SPI core on each
+   is always selected.  LPSPI4_PCS0 is asserted by the SPI core on each
    transaction but has no electrical effect on the display.
+
+.. _st7789-part3:
 
 Part 3 – The ST7789 Display Controller
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -419,6 +425,8 @@ Essential ST7789 Commands
      - 14
      - Negative voltage gamma control curve.
 
+.. _st7789-part4:
+
 Part 4 – RGB565 Pixel Format and the Framebuffer
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -536,12 +544,16 @@ This applies only to the **userspace → kernel flush path** (mmap + ioctl).  Th
 kernel drawing primitives (st7789_fill, st7789_fill_rect, etc.) write big-endian
 directly because they construct the byte array themselves.
 
+.. _st7789-part5:
+
 Part 5 – ST7789 Driver Functions Reference
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 This section provides complete, copy-pasteable implementations of every function
 students must implement.  Use these as a reference — read and understand each
 function before implementing it yourself in the skeleton.
+
+.. _st7789-part5-1:
 
 5.1 – Low-level SPI Primitives
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -592,6 +604,8 @@ opcode or a data byte.  It must be **stable for the entire SPI byte transfer**:
    ``GPIO_ACTIVE_HIGH``, so ``gpiod_set_value(priv->dc, 1)`` drives the pin HIGH
    (data mode) and ``gpiod_set_value(priv->dc, 0)`` drives it LOW (command mode).
 
+.. _st7789-part5-2:
+
 5.2 – Hardware Reset
 ^^^^^^^^^^^^^^^^^^^^^
 
@@ -608,6 +622,8 @@ logical 1 (the gpiod layer inverts to physical LOW):
        gpiod_set_value(priv->reset, 0);   /* deassert RESX HIGH           */
        msleep(150);                        /* wait ≥ 120 ms before cmds    */
    }
+
+.. _st7789-part5-3:
 
 5.3 – Address Window: st7789_set_addr_win
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -671,6 +687,8 @@ range.  Each takes **four bytes encoding two big-endian 16-bit values**:
        return st7789_write_cmd(priv, ST7789_RAMWR);
    }
 
+.. _st7789-part5-4:
+
 5.4 – Full-screen Fill: st7789_fill
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -715,6 +733,8 @@ Total: 243 SPI transactions instead of 172,800 — a **710× reduction**.
        return ret;
    }
 
+.. _st7789-part5-5:
+
 5.5 – Single Pixel: st7789_draw_pixel
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -741,6 +761,8 @@ two-byte RGB565 value.  Note: the ST7789 expects big-endian — high byte first.
        if (ret) return ret;
        return st7789_write_data(priv, pixel, 2);
    }
+
+.. _st7789-part5-6:
 
 5.6 – Filled Rectangle: st7789_fill_rect
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -783,6 +805,8 @@ ensures callers do not need to range-check their arguments:
        kfree(line);
        return ret;
    }
+
+.. _st7789-part5-7:
 
 5.7 – Line Drawing: st7789_draw_line
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -829,6 +853,8 @@ When the error exceeds a threshold the minor axis steps by one pixel.
        }
        return 0;
    }
+
+.. _st7789-part5-8:
 
 5.8 – Circle Outline: st7789_draw_circle
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -885,6 +911,8 @@ The **decision variable d** starts at ``1 - r`` and is updated each step:
        return 0;
    }
 
+.. _st7789-part5-9:
+
 5.9 – Filled Circle: st7789_fill_circle
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -922,6 +950,8 @@ each row at vertical offset ``dy`` from the center, the chord half-width is
        return 0;
    }
 
+.. _st7789-part5-10:
+
 5.10 – Userspace Flush: st7789_flush
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -957,6 +987,8 @@ to big-endian, and blasts the result to the display over SPI:
        return ret;
    }
 
+.. _st7789-part6:
+
 Part 6 – Physical Wiring
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -985,21 +1017,21 @@ The SPI clock is set to 62.5 MHz (T\ :sub:`SCYCW` = 16 ns, §7.4.3 of the datash
      - —
      - Tie high for always-on backlight.
    * - SCL (clock)
-     - Pin 23
-     - GPIO_IO11
-     - LPSPI3_SCK
+     - Pin 16
+     - GPIO_IO21
+     - LPSPI4_SCK; driven by GPIO2_IO21
    * - SDA (MOSI)
-     - Pin 19
-     - GPIO_IO10
-     - LPSPI3_SOUT
+     - —
+     - GPIO_IO20
+     - LPSPI4_SOUT; driven by GPIO2_IO20 (see board schematic for J601 pin)
    * - RES (reset)
-     - Pin 32
-     - GPIO_IO12
-     - Active-low; driven by GPIO2_IO12
+     - Pin 15
+     - GPIO_IO19
+     - Active-low; driven by GPIO2_IO19
    * - DC (data/cmd)
-     - Pin 7
-     - GPIO_IO04
-     - Active-high = data; driven by GPIO2_IO04
+     - Pin 22
+     - GPIO_IO13
+     - Active-high = data; driven by GPIO2_IO13
    * - CS
      - GND (module internal)
      - —
@@ -1010,12 +1042,14 @@ The SPI clock is set to 62.5 MHz (T\ :sub:`SCYCW` = 16 ns, §7.4.3 of the datash
    Double-check VCC before powering on.  Applying 5 V to the ST7789 module will
    **permanently damage** the display controller.
 
+.. _st7789-part7:
+
 Part 7 – Device Tree
 ~~~~~~~~~~~~~~~~~~~~~
 
 Two device tree nodes are required:
 
-1. An ``&lpspi3`` bus node activating the LPSPI3 controller.
+1. An ``&lpspi4`` bus node activating the LPSPI4 controller.
 2. An ``st7789`` child node describing the display as an SPI device.
 
 Add the following fragment to
@@ -1024,41 +1058,39 @@ Add the following fragment to
 .. code-block:: devicetree
 
    /* ------------------------------------------------------------------ */
-   /* LPSPI3 bus node                                                     */
+   /* LPSPI4 bus node                                                     */
    /* ------------------------------------------------------------------ */
-   &lpspi3 {
+   &lpspi4 {
        #address-cells = <1>;
        #size-cells    = <0>;
        status         = "okay";
 
-       pinctrl-0    = <&pinctrl_lpspi3>;
+       pinctrl-0    = <&pinctrl_lpspi4_st7789>;
        pinctrl-names = "default";
 
-       st7789_display: display@0 {
+       lkss_st7789: st7789@0 {
            compatible        = "lkss,st7789";
            reg               = <0>;            /* chip-select index 0   */
            spi-max-frequency = <62500000>;      /* 62.5 MHz = 1/T_SCYCW_min (16 ns) */
 
-           /* Reset: GPIO2_IO12 (J601 pin 32), active-low */
-           reset-gpios = <&gpio2 12 GPIO_ACTIVE_LOW>;
+           /* D/C:   GPIO2_IO13 (J601 pin 22), active-high = data */
+           dc-gpios    = <&gpio2 13 GPIO_ACTIVE_HIGH>;
 
-           /* D/C:   GPIO2_IO04 (J601 pin  7), active-high = data */
-           dc-gpios    = <&gpio2  4 GPIO_ACTIVE_HIGH>;
+           /* Reset: GPIO2_IO19 (J601 pin 15), active-low */
+           reset-gpios = <&gpio2 19 GPIO_ACTIVE_LOW>;
        };
    };
 
    /* ------------------------------------------------------------------ */
-   /* iomuxc pin group: LPSPI3 + RST + D/C GPIOs                         */
+   /* iomuxc pin group: LPSPI4 + D/C + RST GPIOs                         */
    /* ------------------------------------------------------------------ */
    &iomuxc {
-       pinctrl_lpspi3: lpspi3-grp {
+       pinctrl_lpspi4_st7789: lpspi4-st7789grp {
            fsl,pins = <
-               MX93_PAD_GPIO_IO11__LPSPI3_SCK   0x31e   /* J601 pin 23 */
-               MX93_PAD_GPIO_IO10__LPSPI3_SOUT  0x31e   /* J601 pin 19 */
-               MX93_PAD_GPIO_IO09__LPSPI3_SIN   0x31e   /* J601 pin 21 */
-               MX93_PAD_GPIO_IO08__LPSPI3_PCS0  0x31e   /* J601 pin 24 */
-               MX93_PAD_GPIO_IO12__GPIO2_IO12   0x31e   /* J601 pin 32, RST */
-               MX93_PAD_GPIO_IO04__GPIO2_IO04   0x31e   /* J601 pin  7, D/C */
+               MX93_PAD_GPIO_IO21__LPSPI4_SCK   0x31e   /* J601 pin 16, SCK  */
+               MX93_PAD_GPIO_IO20__LPSPI4_SOUT  0x31e   /* MOSI              */
+               MX93_PAD_GPIO_IO13__GPIO2_IO13   0x31e   /* J601 pin 22, D/C  */
+               MX93_PAD_GPIO_IO19__GPIO2_IO19   0x31e   /* J601 pin 15, RST  */
            >;
        };
    };
@@ -1069,6 +1101,8 @@ Add the following fragment to
    ``arch/arm64/boot/dts/freescale/imx93-pinfunc.h``.
    The pad config value ``0x31e`` sets: input buffer enabled, pull-up disabled,
    6 mA drive strength.
+
+.. _st7789-part8:
 
 Part 8 – Userspace Interface: the ST7789 Miscdevice
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1193,7 +1227,7 @@ Lab Exercises – Kernel Driver
 
    - Skeleton: ``drivers/lkss/labs/lab3/lkss_st7789.c``  (TODOs 1–13)
    - Solution: ``drivers/lkss/labs/lab3/lkss_st7789_sol.c``
-   - Wire the display as described in Part 6 before loading the driver.
+   - Wire the display as described in :ref:`Part 6 <st7789-part6>` before loading the driver.
    - Build command::
 
         make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
@@ -1211,7 +1245,11 @@ Exercise 1 – Wire the Hardware
 
 **Objective**: Connect the ST7789 display module to the i.MX93 FRDM board.
 
-1. Using the wiring table in **Part 6**, connect the 7-pin display module to the
+.. note::
+   If you are using the LKSS daugther board, insert the ST7789 display into
+   the corresponding location indicated by the **J4** pin header and then **SKIP TO NEXT EXERCISE**
+
+1. Using the wiring table in :ref:`Part 6 <st7789-part6>`, connect the 7-pin display module to the
    EXT2 header (J601) using short jumper wires.
 2. Double-check VCC goes to 3.3 V only.  Connect BLK to 3.3 V for always-on backlight.
 3. The display should power on (backlight on) as soon as 3.3 V is applied,
@@ -1230,11 +1268,9 @@ Exercise 2 – Add the Device Tree Node
 **Objective**: Describe the hardware to the kernel so the SPI core can match and
 bind the driver.
 
-1. Open the board DTS file::
+1. Open the i.MX93 FRDM dts file: ``repos/lkss-linux/arch/arm64/boot/dts/freescale/imx93-11x11-frdm.dts``
 
-      $EDITOR repos/lkss-linux/arch/arm64/boot/dts/freescale/imx93-11x11-frdm.dts
-
-2. Add the ``&lpspi3`` and ``&iomuxc`` ``pinctrl_lpspi3`` nodes from **Part 7**.
+2. Add the ``&lpspi4`` and ``&iomuxc`` ``pinctrl_lpspi4_st7789`` nodes from :ref:`Part 7 <st7789-part7>`.
 
 3. Rebuild the DTB only (no need to rebuild the kernel image)::
 
@@ -1246,38 +1282,12 @@ bind the driver.
 
       ls /sys/bus/spi/devices/
 
-   Expected: ``spi3.0`` (LPSPI3, chip-select 0).
+   Expected: ``spi4.0`` (LPSPI4, chip-select 0).
 
 5. Inspect the compatible string at runtime::
 
-      cat /sys/bus/spi/devices/spi3.0/of_node/compatible
+      cat /sys/bus/spi/devices/spi4.0/of_node/compatible
       # Expected: lkss,st7789
-
-**Questions:**
-
-1. What happens if the ``compatible`` string in the DT node is misspelled?
-2. What does ``reg = <0>`` mean?  What would ``reg = <1>`` select?
-3. What does the pad configuration value ``0x31e`` configure on i.MX93?
-   (Hint: see the IOMUXC chapter of the i.MX93 Reference Manual.)
-
-.. admonition:: Reference Answers
-
-   **1.** The SPI core iterates its ``of_device_id`` table looking for an entry
-   whose ``compatible`` string matches the one in the DT node.  A mismatch means
-   no driver is found; ``probe()`` is never called and the device stays unbound.
-   ``ls /sys/bus/spi/devices/spi3.0/driver`` will show nothing.
-
-   **2.** ``reg`` is the chip-select index on the LPSPI3 bus.  ``<0>`` selects
-   CS0 (the LPSPI3_CS0 pad).  ``<1>`` would select CS1, and the SPI controller
-   would toggle a different chip-select line for each transaction — useful when
-   two devices share the same SPI bus.
-
-   **3.** ``0x31e`` = ``0b_0011_0001_1110``.  On i.MX93 the IOMUXC pad control
-   register bits are: DSE[6:4] (drive strength), FSEL[9:8] (slew rate), PUE[3]
-   (pull enable), PDE[2] (pull down), ODE[1] (open-drain), SRE[0].
-   ``0x31e`` configures: FSEL=3 (fast slew), DSE=1 (×1 drive), PUE=1 and PDE=1
-   (pull-down enabled), ODE=1 (open-drain).  In practice this matches the
-   recommended SPI pad settings for the LPSPI3 interface on the FRDM board.
 
 ----
 
@@ -1305,8 +1315,8 @@ Exercise 3 – Build and Load the Driver Skeleton
 4. Expected output — ``probe()`` is called but returns immediately because
    ``TODO 3`` (init_display) returns ``-EOPNOTSUPP``::
 
-      [  xx.xx] spi3.0: ST7789 probe: speed=62500000 Hz mode=0x00
-      [  xx.xx] spi3.0: display init failed: -95
+      [  xx.xx] spi4.0: ST7789 probe: speed=62500000 Hz mode=0x00
+      [  xx.xx] spi4.0: display init failed: -95
 
    This is **expected** — the skeleton stubs return ``-EOPNOTSUPP`` (-95) until
    you implement each TODO.
@@ -1345,7 +1355,7 @@ Exercise 3 – Build and Load the Driver Skeleton
 Exercise 4 – TODO 1: Low-level SPI Primitives
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Reference**: Theory Part 5.1.
+**Reference**: :ref:`Theory Part 5.1 – Low-level SPI Primitives <st7789-part5-1>`.
 
 Open ``lkss_st7789.c`` and find the ``TODO 1`` comment blocks.  Implement:
 
@@ -1385,7 +1395,7 @@ and fail at a later stage (TODO 2 or TODO 3).
 Exercise 5 – TODO 2: Hardware Reset
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Reference**: Theory Part 5.2.
+**Reference**: :ref:`Theory Part 5.2 – Hardware Reset <st7789-part5-2>`.
 
 Implement ``st7789_hw_reset()``:
 
@@ -1408,7 +1418,7 @@ should see a ~20 ms LOW pulse followed by the line going HIGH.
    Logical 1 means "asserted" (active state).  In the device tree the GPIO is
    declared with the ``GPIO_ACTIVE_LOW`` flag::
 
-      reset-gpios = <&gpio4 12 GPIO_ACTIVE_LOW>;
+      reset-gpios = <&gpio2 19 GPIO_ACTIVE_LOW>;
 
    The kernel GPIO subsystem inverts the physical level for active-low GPIOs:
    logical 1 → physical LOW; logical 0 → physical HIGH.  This means the driver
@@ -1421,7 +1431,7 @@ should see a ~20 ms LOW pulse followed by the line going HIGH.
 Exercise 6 – TODO 3: Initialization Sequence
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Reference**: Theory Part 3, Essential Commands table.
+**Reference**: :ref:`Theory Part 3 – The ST7789 Display Controller <st7789-part3>`, Essential Commands table.
 
 Implement ``st7789_init_display()``.  You can start with the **minimal 6-command
 sequence** — the display will turn on and show something:
@@ -1471,7 +1481,7 @@ yet implemented the screen may show garbage or be white — that is normal.
 Exercise 7 – TODO 4: Address Window and Fill
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Reference**: Theory Part 5.3 (set_addr_win) and Part 5.4 (fill).
+**Reference**: :ref:`Theory Part 5.3 – Address Window <st7789-part5-3>` and :ref:`Part 5.4 – Full-screen Fill <st7789-part5-4>`.
 
 Implement both functions in the ``TODO 4`` block:
 
@@ -1520,7 +1530,7 @@ The display should flash red, green, blue in sequence.
 Exercise 8 – TODO 5: Filled Rectangle
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Reference**: Theory Part 5.6.
+**Reference**: :ref:`Theory Part 5.6 – Filled Rectangle <st7789-part5-6>`.
 
 Implement ``st7789_fill_rect()``.  Key points:
 
@@ -1558,7 +1568,7 @@ Implement ``st7789_fill_rect()``.  Key points:
 Exercise 9 – TODO 6: Single Pixel
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Reference**: Theory Part 5.5.
+**Reference**: :ref:`Theory Part 5.5 – Single Pixel <st7789-part5-5>`.
 
 Implement ``st7789_draw_pixel()``:
 
@@ -1598,7 +1608,7 @@ Implement ``st7789_draw_pixel()``:
 Exercise 10 – TODO 7: Line Drawing
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Reference**: Theory Part 5.7 (Bresenham algorithm).
+**Reference**: :ref:`Theory Part 5.7 – Line Drawing (Bresenham) <st7789-part5-7>`.
 
 Implement ``st7789_draw_line()``.  Follow the algorithm exactly as described:
 initialize ``dx``, ``dy``, ``sx``, ``sy``, ``err`` from the endpoint coordinates,
@@ -1651,7 +1661,7 @@ Then add horizontal and vertical lines::
 Exercise 11 – TODO 8: Circle Outline
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Reference**: Theory Part 5.8 (midpoint algorithm).
+**Reference**: :ref:`Theory Part 5.8 – Circle Outline (midpoint algorithm) <st7789-part5-8>`.
 
 Implement ``st7789_draw_circle()``.  Use the ``PLOT`` macro pattern from the
 reference implementation to plot all 8 symmetric points per iteration.  Start
@@ -1694,7 +1704,7 @@ with ``x=0, y=r, d=1-r`` and loop while ``x <= y``.
 Exercise 12 – TODO 9: Filled Circle
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Reference**: Theory Part 5.9 (chord fill).
+**Reference**: :ref:`Theory Part 5.9 – Filled Circle (chord fill) <st7789-part5-9>`.
 
 Implement ``st7789_fill_circle()``.  Iterate ``dy`` from ``-r`` to ``+r``.
 For each ``dy`` compute ``dx = int_sqrt(r*r - dy*dy)`` and call
@@ -1860,7 +1870,7 @@ boundary, which will be larger than ``fbsize``, causing a false ``-EINVAL``.
         .llseek         = default_llseek,
     };
 
-Also implement ``st7789_flush()`` from **Theory Part 5.10**.
+Also implement ``st7789_flush()`` from :ref:`Theory Part 5.10 – Userspace Flush <st7789-part5-10>`.
 
 **Test**: The module should build cleanly.  Functional test in Exercise 16.
 
