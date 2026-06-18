@@ -1272,21 +1272,22 @@ bind the driver.
 
 2. Add the ``&lpspi4`` and ``&iomuxc`` ``pinctrl_lpspi4_st7789`` nodes from :ref:`Part 7 <st7789-part7>`.
 
-3. Rebuild the DTB only (no need to rebuild the kernel image)::
-
-      make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-           freescale/imx93-11x11-frdm.dtb -j$(nproc)
-      python3 scripts/lkss.py boot
+3. Recompile and boot
+      $ ./scripts/lkss.py compile
+      $ python3 scripts/lkss.py boot
 
 4. On the board, verify the SPI device appeared::
 
       ls /sys/bus/spi/devices/
 
-   Expected: ``spi4.0`` (LPSPI4, chip-select 0).
+   You should see an entry like ``spi0.0``.  The bus number is assigned by the
+   kernel in probe order — **not** by the LPSPI hardware number.  Without a
+   ``spi4 = &lpspi4`` alias in the DTS, LPSPI4 gets the next free number;
+   typically ``0`` when it is the only active SPI controller.
 
-5. Inspect the compatible string at runtime::
+5. Inspect the compatible string at runtime (replace ``0`` with the actual bus number)::
 
-      cat /sys/bus/spi/devices/spi4.0/of_node/compatible
+      cat /sys/bus/spi/devices/spi0.0/of_node/compatible
       # Expected: lkss,st7789
 
 ----
@@ -1315,8 +1316,8 @@ Exercise 3 – Build and Load the Driver Skeleton
 4. Expected output — ``probe()`` is called but returns immediately because
    ``TODO 3`` (init_display) returns ``-EOPNOTSUPP``::
 
-      [  xx.xx] spi4.0: ST7789 probe: speed=62500000 Hz mode=0x00
-      [  xx.xx] spi4.0: display init failed: -95
+      [  xx.xx] spi0.0: ST7789 probe: speed=62500000 Hz mode=0x00
+      [  xx.xx] spi0.0: display init failed: -95
 
    This is **expected** — the skeleton stubs return ``-EOPNOTSUPP`` (-95) until
    you implement each TODO.
