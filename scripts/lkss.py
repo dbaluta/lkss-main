@@ -62,7 +62,10 @@ def compile(jobs: int, install_modules: bool, clean_config: bool):
 	if clean_config:
 		commands = [command + lkss_env.data["DEFCONFIG_NAME"], command]
 	else:
-		commands = [command]
+		# olddefconfig fills in any new Kconfig symbols with their default
+		# value non-interactively, so a stale .config never drops into the
+		# "Restart config..." prompt loop that make would otherwise show.
+		commands = [command + "olddefconfig", command]
 
 	lkss_get_runner(lkss_env.data["RUNNER"]).run_batch(commands)
 

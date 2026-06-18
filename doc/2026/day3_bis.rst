@@ -249,7 +249,9 @@ ST7789 Interface Pins (SPI 4-Line Mode)
      - Serial data, clocked on rising edge (SPI Mode 0).
    * - **SCL** (SCK)
      - Input
-     - Serial clock.  Max write clock 80 MHz; we use 40 MHz.
+     - Serial clock.  Max write clock **62.5 MHz** (datasheet §7.4.3:
+       T\ :sub:`SCYCW` ≥ 16 ns → f\ :sub:`max` = 1/16 ns = 62.5 MHz).
+       The lab DTS uses ``spi-max-frequency = <62500000>``.
    * - **BLK** (LED+)
      - Input
      - Backlight control.  Connect to 3.3 V for always-on.
@@ -959,7 +961,8 @@ Part 6 – Physical Wiring
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Connect the ST7789 display module (7-pin breakout) to the EXT2 header (J601) as
-shown below.  Use short jumper wires (≤ 15 cm) to maintain signal integrity at 40 MHz.
+shown below.  Use short jumper wires (≤ 15 cm) to maintain signal integrity.
+The SPI clock is set to 62.5 MHz (T\ :sub:`SCYCW` = 16 ns, §7.4.3 of the datasheet).
 
 .. list-table::
    :header-rows: 1
@@ -1034,7 +1037,7 @@ Add the following fragment to
        st7789_display: display@0 {
            compatible        = "lkss,st7789";
            reg               = <0>;            /* chip-select index 0   */
-           spi-max-frequency = <40000000>;      /* 40 MHz                */
+           spi-max-frequency = <62500000>;      /* 62.5 MHz = 1/T_SCYCW_min (16 ns) */
 
            /* Reset: GPIO2_IO12 (J601 pin 32), active-low */
            reset-gpios = <&gpio2 12 GPIO_ACTIVE_LOW>;
@@ -1257,6 +1260,25 @@ bind the driver.
 3. What does the pad configuration value ``0x31e`` configure on i.MX93?
    (Hint: see the IOMUXC chapter of the i.MX93 Reference Manual.)
 
+.. admonition:: Reference Answers
+
+   **1.** The SPI core iterates its ``of_device_id`` table looking for an entry
+   whose ``compatible`` string matches the one in the DT node.  A mismatch means
+   no driver is found; ``probe()`` is never called and the device stays unbound.
+   ``ls /sys/bus/spi/devices/spi3.0/driver`` will show nothing.
+
+   **2.** ``reg`` is the chip-select index on the LPSPI3 bus.  ``<0>`` selects
+   CS0 (the LPSPI3_CS0 pad).  ``<1>`` would select CS1, and the SPI controller
+   would toggle a different chip-select line for each transaction — useful when
+   two devices share the same SPI bus.
+
+   **3.** ``0x31e`` = ``0b_0011_0001_1110``.  On i.MX93 the IOMUXC pad control
+   register bits are: DSE[6:4] (drive strength), FSEL[9:8] (slew rate), PUE[3]
+   (pull enable), PDE[2] (pull down), ODE[1] (open-drain), SRE[0].
+   ``0x31e`` configures: FSEL=3 (fast slew), DSE=1 (×1 drive), PUE=1 and PDE=1
+   (pull-down enabled), ODE=1 (open-drain).  In practice this matches the
+   recommended SPI pad settings for the LPSPI3 interface on the FRDM board.
+
 ----
 
 Exercise 3 – Build and Load the Driver Skeleton
@@ -1283,7 +1305,7 @@ Exercise 3 – Build and Load the Driver Skeleton
 4. Expected output — ``probe()`` is called but returns immediately because
    ``TODO 3`` (init_display) returns ``-EOPNOTSUPP``::
 
-      [  xx.xx] spi3.0: ST7789 probe: speed=40000000 Hz mode=0x00
+      [  xx.xx] spi3.0: ST7789 probe: speed=62500000 Hz mode=0x00
       [  xx.xx] spi3.0: display init failed: -95
 
    This is **expected** — the skeleton stubs return ``-EOPNOTSUPP`` (-95) until
@@ -1294,6 +1316,29 @@ Exercise 3 – Build and Load the Driver Skeleton
 1. Which SPI core function calls your ``probe()``?  Look at ``/proc/kallsyms``
    or the kernel source in ``drivers/spi/spi.c``.
 2. What does ``module_spi_driver()`` expand to?
+
+.. admonition:: Reference Answers
+
+   **1.** The call chain is: ``spi_register_driver()`` → device/driver core matching
+   → ``spi_drv_probe()`` in ``drivers/spi/spi.c`` → ``st7789_probe()``.
+   ``spi_drv_probe()`` is the generic SPI shim registered as ``.probe`` in the
+   ``device_driver`` struct; it unpacks the ``spi_device`` and calls the driver's
+   own ``probe`` function pointer.
+
+   **2.** ``module_spi_driver(drv)`` is a macro that expands to:
+
+   .. code-block:: c
+
+      static int __init drv##_init(void)
+      { return spi_register_driver(&drv); }
+      module_init(drv##_init);
+
+      static void __exit drv##_exit(void)
+      { spi_unregister_driver(&drv); }
+      module_exit(drv##_exit);
+
+   It eliminates the boilerplate ``module_init``/``module_exit`` pair that every
+   SPI driver would otherwise have to write identically.
 
 ----
 
@@ -1319,6 +1364,22 @@ and fail at a later stage (TODO 2 or TODO 3).
 2. ``spi_write()`` is synchronous — it blocks until the transfer completes.
    When would you use ``spi_async()`` instead?
 
+.. admonition:: Reference Answers
+
+   **1.** The ST7789 samples the DCX line at the start of each byte.  If DCX
+   changes during a transfer, bytes before the toggle are interpreted with the
+   original meaning (command or data) and bytes after with the opposite meaning.
+   For example, if DCX goes HIGH mid-way through a command byte, the controller
+   would treat the remaining bits as data parameters, garbling the command.
+   In practice, ``gpiod_set_value()`` is called *before* ``spi_write()``, and
+   ``spi_write()`` is blocking — the GPIO level is stable for the entire transfer.
+
+   **2.** ``spi_async()`` is used when: (a) you cannot sleep (e.g. interrupt context
+   or a real-time path), (b) you want to pipeline multiple transfers and be
+   notified via a completion callback, or (c) you need DMA-backed non-blocking
+   transfers for high-throughput cases.  For a probe-time display driver on a slow
+   SPI bus, ``spi_write()`` is simpler and perfectly correct.
+
 ----
 
 Exercise 5 – TODO 2: Hardware Reset
@@ -1340,6 +1401,20 @@ should see a ~20 ms LOW pulse followed by the line going HIGH.
 
 1. Why does ``gpiod_set_value(priv->reset, 1)`` drive the pin **LOW**?
    What role does ``GPIO_ACTIVE_LOW`` in the device tree play?
+
+.. admonition:: Reference Answers
+
+   **1.** The ``gpiod`` API works with *logical* values, not physical pin levels.
+   Logical 1 means "asserted" (active state).  In the device tree the GPIO is
+   declared with the ``GPIO_ACTIVE_LOW`` flag::
+
+      reset-gpios = <&gpio4 12 GPIO_ACTIVE_LOW>;
+
+   The kernel GPIO subsystem inverts the physical level for active-low GPIOs:
+   logical 1 → physical LOW; logical 0 → physical HIGH.  This means the driver
+   code reads naturally ("assert reset = 1, deassert = 0") without having to
+   know the physical polarity.  If the hardware were changed to an active-high
+   reset, only the DT flag would change, not the driver code.
 
 ----
 
@@ -1376,6 +1451,21 @@ yet implemented the screen may show garbage or be white — that is normal.
 1. What would the display look like without ``INVON``?  Try removing it.
 2. What does ``COLMOD 0x55`` configure?  What value would you use for 18 bpp?
 
+.. admonition:: Reference Answers
+
+   **1.** Without ``INVON``, all colors appear as their RGB complement: red shows
+   as cyan, white shows as black, green shows as magenta, etc.  Most ST7789 IPS
+   modules are manufactured with the liquid crystal layer oriented in the
+   inverted sense, so ``INVON`` is required to display natural colors.  Removing
+   it and running the red/green/blue fill test will show cyan/magenta/yellow
+   instead — a reliable way to verify the command is working.
+
+   **2.** ``COLMOD`` sets the pixel format for both the MCU interface (how SPI
+   data is packed) and the RGB interface (unused).  The value ``0x55`` encodes
+   ``0x5`` in each nibble: high nibble = RGB interface 16 bpp, low nibble = MCU
+   interface 16 bpp (RGB565, 2 bytes per pixel).  For 18 bpp (RGB666) you would
+   use ``0x66``.
+
 ----
 
 Exercise 7 – TODO 4: Address Window and Fill
@@ -1407,6 +1497,24 @@ The display should flash red, green, blue in sequence.
 2. Why allocate one scanline buffer and loop, rather than one pixel at a time?
    How many SPI transactions does each approach use for a full-screen fill?
 
+.. admonition:: Reference Answers
+
+   **1.** The CASET parameter encodes two 16-bit values (x0 and x1) in big-endian
+   byte order.  If sent little-endian, e.g. for x1=239 (0x00EF) the bytes
+   ``{0xEF, 0x00}`` would be interpreted as 0xEF00 = 61184 — far outside the
+   240-pixel panel.  The controller would either clip to its internal maximum or
+   accept an out-of-range window, but in either case no correct pixel data would
+   reach the display (the window would be empty or mispositioned) and the screen
+   would stay blank or show garbage.
+
+   **2.** Each ``spi_write()`` call has a fixed setup cost (DMA descriptor,
+   interrupt, bus arbitration).  Sending one pixel at a time means 6 ``spi_write``
+   calls per pixel (CASET cmd + data + RASET cmd + data + RAMWR cmd + pixel data)
+   × 57,600 pixels = **345,600 calls** for a full screen.  With one scanline
+   buffer: ``set_addr_win`` (3 calls) + 240 row writes = **243 calls** — roughly
+   1,400× fewer SPI transactions, which translates directly to a much shorter
+   fill time.
+
 ----
 
 Exercise 8 – TODO 5: Filled Rectangle
@@ -1433,6 +1541,18 @@ Implement ``st7789_fill_rect()``.  Key points:
 1. What happens if you skip the coordinate clamping and the caller passes
    ``x=230, w=20`` on a 240-pixel-wide panel?
 
+.. admonition:: Reference Answers
+
+   **1.** Without clamping, ``x + w - 1 = 249``.  The CASET command sends x1=249
+   as the column end.  The ST7789 clips its internal window to the physical panel
+   boundary (239), so in practice only columns 230–239 (10 pixels) are drawn
+   instead of 20.  The row buffer is still ``w*2 = 40`` bytes wide, so you are
+   sending 20 columns worth of data for a 10-column window — the last 10 pixels
+   of each row are silently discarded by the controller.  Visually the rectangle
+   appears half the width the caller requested.  On a different controller the
+   behavior might be a hard error or undefined; clamping is necessary for correct
+   and portable behavior.
+
 ----
 
 Exercise 9 – TODO 6: Single Pixel
@@ -1458,6 +1578,20 @@ Implement ``st7789_draw_pixel()``:
    (Hint: count the calls to ``spi_write()`` inside one ``draw_pixel()``.)
 2. Drawing 57,600 pixels one at a time: how many SPI transactions total?
    Why is ``st7789_fill()`` so much more efficient?
+
+.. admonition:: Reference Answers
+
+   **1.** One ``draw_pixel()`` call: ``set_addr_win()`` issues 5 ``spi_write()``
+   calls (CASET cmd, CASET data, RASET cmd, RASET data, RAMWR cmd), plus 1
+   ``spi_write()`` for the 2-byte pixel data = **6 ``spi_write()`` calls per
+   pixel**.
+
+   **2.** 57,600 pixels × 6 = **345,600 ``spi_write()`` calls**.
+   ``st7789_fill()`` uses a single ``set_addr_win()`` (3 calls) covering the
+   entire panel, then 240 row writes = **243 calls** total — about 1,400×
+   fewer.  The efficiency gain comes from re-using one address window for all
+   pixels: the controller auto-advances its write pointer after each pixel, so
+   no per-pixel addressing overhead is needed.
 
 ----
 
@@ -1486,6 +1620,32 @@ Then add horizontal and vertical lines::
    After the first two iterations, what are the values of ``err``, ``x0``, ``y0``?
 2. What is the geometric meaning of the variable ``e2``?
 
+.. admonition:: Reference Answers
+
+   **1.** Setup: ``dx=3, dy=-2, sx=1, sy=1, err = dx+dy = 1``.
+
+   .. code-block:: text
+
+      iter  action        x0  y0  err   e2   step-x?  step-y?
+      ----  ------        --  --  ---   --   -------  -------
+        1   plot (0,0)     0   0    1    2   yes→-1   yes→+2
+            after step:    1   1    2
+        2   plot (1,1)     1   1    2    4   yes→ 0   no
+            after step:    2   1    0
+
+   After two iterations: **err = 0, x0 = 2, y0 = 1**.
+
+   The remaining iterations plot (2,1) and (3,2).  Full sequence:
+   (0,0) → (1,1) → (2,1) → (3,2).
+
+   **2.** ``e2 = 2 * err`` is the doubled error accumulator.  Geometrically
+   ``err`` tracks how far the current pixel path deviates from the ideal
+   mathematical line: negative means the raster path is below the line, positive
+   means above.  Doubling it before the two threshold comparisons (``dy`` and
+   ``dx``) lets both the x-step and y-step conditions be evaluated against the
+   *same* value of ``e2`` without modifying ``err`` between the checks —
+   avoiding the need for fractions while maintaining sub-pixel accuracy.
+
 ----
 
 Exercise 11 – TODO 8: Circle Outline
@@ -1510,6 +1670,24 @@ with ``x=0, y=r, d=1-r`` and loop while ``x <= y``.
 1. Why does the algorithm plot 8 points per iteration?
    Which 8-fold symmetry of a circle does this exploit?
 2. What is the geometric meaning of the decision variable ``d``?
+
+.. admonition:: Reference Answers
+
+   **1.** A circle centered at (cx, cy) has 8-fold symmetry: it is invariant under
+   reflection about the horizontal axis (y → -y), vertical axis (x → -x), and
+   both diagonals (x ↔ y and x ↔ -y).  Computing one point (cx+x, cy+y) in the
+   first octant immediately gives seven others for free:
+   ``(cx±x, cy±y)`` and ``(cx±y, cy±x)``.  All 8 are plotted every iteration,
+   so the algorithm only needs to march through one eighth of the circle (the
+   octant where x goes from 0 to r/√2) while the whole circumference is rendered.
+
+   **2.** ``d`` is the value of the *implicit circle equation* ``f(x,y) = x² + y² - r²``
+   evaluated at the *midpoint* between the two candidate pixels for the next
+   step.  Initially ``d = 1 - r`` (midpoint between (1, r) and (1, r-1)).
+   If ``d < 0`` the midpoint is inside the circle (the upper pixel is closer to
+   the circle boundary → y stays); if ``d ≥ 0`` the midpoint is outside (the
+   lower pixel is closer → y decrements).  The integer update formulas maintain
+   this invariant without any floating-point arithmetic or square roots.
 
 ----
 
@@ -1536,6 +1714,20 @@ The white outline should sit exactly on the boundary of the green fill.
    ``fill_circle()`` make?
 2. Why does ``fill_circle`` use ``fill_rect`` with ``h=1`` rather than
    calling ``draw_pixel`` for each point?
+
+.. admonition:: Reference Answers
+
+   **1.** The loop iterates ``dy`` from ``-r`` to ``+r`` inclusive:
+   ``-50, -49, …, 0, …, 49, 50`` = **101 ``fill_rect()`` calls** (one per
+   horizontal chord of the circle).
+
+   **2.** Each ``fill_rect(w=dx*2+1, h=1)`` sets a single address window and sends
+   all pixels of that chord in one continuous SPI burst — 1 ``set_addr_win``
+   + 1 ``spi_write`` for the entire row.  Using ``draw_pixel`` would require
+   a separate ``set_addr_win`` for every single pixel, exploding the SPI
+   transaction count by a factor equal to the chord width (up to 2r+1 = 101
+   for r=50).  The ``fill_rect`` approach is both faster and produces a filled
+   disc without gaps.
 
 ----
 
@@ -1781,6 +1973,24 @@ for example, a checkerboard of 20×20 squares alternating black and white.
    ``struct fb_var_screeninfo`` argument.  Why does our ``ST7789_FLUSH``
    take no argument?
 
+.. admonition:: Reference Answers
+
+   **1.** ``FBIOGET_VSCREENINFO`` is a standard Linux framebuffer ioctl handled by
+   the ``fb_ioctl`` path in the kernel framebuffer subsystem.  Our ``/dev/st7789``
+   is a *miscdevice* — a plain character device — and its ``ioctl`` handler only
+   recognises ``ST7789_FLUSH``; any other command returns ``-ENOTTY``.  There is
+   also no need to query geometry at runtime because the display is fixed at
+   240×240 RGB565.  The constants from ``lkss_st7789.h`` replace the ioctl call,
+   making ``fb_open()`` simpler and removing the dependency on the framebuffer
+   subsystem.
+
+   **2.** ``FBIOPAN_DISPLAY`` takes a ``struct fb_var_screeninfo`` containing a
+   ``yoffset`` field so the driver knows which page of video RAM to display —
+   this supports double/triple buffering by flipping between alternating regions
+   of a large framebuffer.  Our driver has exactly one buffer (the vmalloc region)
+   with no panning concept, so no argument is needed.  The entire buffer is always
+   flushed on every ``ST7789_FLUSH`` call.
+
 ----
 
 Exercise 18 – Userspace: Run the Demo Suite
@@ -1823,6 +2033,35 @@ variant of the original framebuffer demos adapted to use ``lkss_st7789.h`` and
    the CPU bandwidth consumed just by byteswapping?
 3. How would you eliminate the byteswap?  (Hint: think about how you store
    the pixel in userspace, or look at the MADCTL ``BGR`` bit.)
+
+.. admonition:: Reference Answers
+
+   **1.** The SPI bus is the bottleneck.  Transferring 240×240×2 = 115,200 bytes
+   At 62.5 MHz SPI clock, transferring 115,200 × 8 bits takes
+   115,200 × 8 / 62,500,000 ≈ **15 ms** per frame, giving a theoretical
+   maximum of ~67 fps.  With kernel overhead, mutex acquisition, and game
+   logic the effective rate is typically **40–50 fps**.  The SPI transfer
+   time is the primary bottleneck.
+
+   **2.** 115,200 bytes read + 115,200 bytes written per flush × 30 fps =
+   **6.9 MB/s** of memory bandwidth consumed by the byteswap alone
+   (≈ 3.45 MB/s read + 3.45 MB/s write).  On a Cortex-A55 core this is
+   negligible, but on a slower MCU it can be a real cost.
+
+   **3.** Several approaches:
+
+   - **Store pixels BE in userspace**: write ``htobe16(color)`` instead of
+     ``color`` into the mmap buffer.  The kernel flush becomes a plain
+     ``memcpy`` (or even a DMA transfer) with no byte manipulation.
+   - **SPI controller byte-swap**: some LPSPI controllers support hardware
+     byte reversal per-word; enabling it moves the swap cost to the DMA
+     engine with zero CPU time.
+   - **MADCTL byte-swap (partial)**: the MADCTL ``MY`` / ``MX`` bits rotate
+     and mirror the GRAM, but there is no bit that swaps the byte order of
+     each pixel — the SPI protocol is always MSB-first.  So MADCTL does
+     not help here.
+   The cleanest production solution is to agree on big-endian in userspace
+   and remove the swap from the kernel entirely.
 
 ----
 
