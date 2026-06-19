@@ -427,6 +427,96 @@ Essential ST7789 Commands
      - 14
      - Negative voltage gamma control curve.
 
+Complete initialization function:
+
+.. code-block:: c
+
+	static int st7789_init_display(struct st7789_priv *priv)
+	{
+		static const u8 porctrl[]   = { 0x05, 0x05, 0x00, 0x33, 0x33 };
+		static const u8 vdvvrhen[]  = { 0x01, 0xFF };
+		static const u8 pwctrl1[]   = { 0xA4, 0xA1 };
+		static const u8 pvgamctrl[] = { 0xD0, 0x05, 0x0A, 0x09, 0x08, 0x05, 0x2E,
+						0x44, 0x45, 0x0F, 0x17, 0x16, 0x2B, 0x33 };
+		static const u8 nvgamctrl[] = { 0xD0, 0x05, 0x0A, 0x09, 0x08, 0x05, 0x2E,
+						0x43, 0x45, 0x0F, 0x16, 0x16, 0x2B, 0x33 };
+		int ret;
+
+		ret = st7789_write_cmd(priv, ST7789_SLPOUT);
+		if (ret) return ret;
+		msleep(600);
+
+		ret = st7789_write_cmd(priv, ST7789_COLMOD);
+		if (ret) return ret;
+		ret = st7789_write_data_byte(priv, ST7789_COLMOD_RGB565);
+		if (ret) return ret;
+
+		ret = st7789_write_cmd(priv, ST7789_PORCTRL);
+		if (ret) return ret;
+		ret = st7789_write_data(priv, porctrl, sizeof(porctrl));
+		if (ret) return ret;
+
+		ret = st7789_write_cmd(priv, ST7789_GCTRL);
+		if (ret) return ret;
+		ret = st7789_write_data_byte(priv, 0x75);
+		if (ret) return ret;
+
+		ret = st7789_write_cmd(priv, ST7789_VDVVRHEN);
+		if (ret) return ret;
+		ret = st7789_write_data(priv, vdvvrhen, sizeof(vdvvrhen));
+		if (ret) return ret;
+
+		ret = st7789_write_cmd(priv, ST7789_VRHS);
+		if (ret) return ret;
+		ret = st7789_write_data_byte(priv, 0x13);
+		if (ret) return ret;
+
+		ret = st7789_write_cmd(priv, ST7789_VDVS);
+		if (ret) return ret;
+		ret = st7789_write_data_byte(priv, 0x20);
+		if (ret) return ret;
+
+		ret = st7789_write_cmd(priv, ST7789_VCOMS);
+		if (ret) return ret;
+		ret = st7789_write_data_byte(priv, 0x22);
+		if (ret) return ret;
+
+		ret = st7789_write_cmd(priv, ST7789_VCMOFSET);
+		if (ret) return ret;
+		ret = st7789_write_data_byte(priv, 0x20);
+		if (ret) return ret;
+
+		ret = st7789_write_cmd(priv, ST7789_PWCTRL1);
+		if (ret) return ret;
+		ret = st7789_write_data(priv, pwctrl1, sizeof(pwctrl1));
+		if (ret) return ret;
+
+		ret = st7789_write_cmd(priv, ST7789_DISPON);
+		if (ret) return ret;
+		msleep(150);
+
+		ret = st7789_write_cmd(priv, ST7789_INVON);
+		if (ret) return ret;
+
+		ret = st7789_write_cmd(priv, ST7789_MADCTL);
+		if (ret) return ret;
+		ret = st7789_write_data_byte(priv, ST7789_MADCTL_NORMAL);
+		if (ret) return ret;
+
+		ret = st7789_write_cmd(priv, ST7789_PVGAMCTRL);
+		if (ret) return ret;
+		ret = st7789_write_data(priv, pvgamctrl, sizeof(pvgamctrl));
+		if (ret) return ret;
+
+		ret = st7789_write_cmd(priv, ST7789_NVGAMCTRL);
+		if (ret) return ret;
+		ret = st7789_write_data(priv, nvgamctrl, sizeof(nvgamctrl));
+		if (ret) return ret;
+
+		return 0;
+	}
+
+
 .. _st7789-part4:
 
 Part 4 – RGB565 Pixel Format and the Framebuffer
@@ -1316,8 +1406,7 @@ Exercise 3 – Build and Load the driver skeleton
 4. Expected output, ``probe()`` is called but returns immediately because
    ``TODO Ex-6`` (init_display) returns ``-EOPNOTSUPP``::
 
-      [  xx.xx] spi0.0: ST7789 probe: speed=62500000 Hz mode=0x00
-      [  118.615213] lkss-st7789 spi0.0: ST7789 probe: speed=62500000 Hz mode=0x00
+      [  118.615213] lkss-st7789 spi0.0: ST7789 probe: speed=62500000 Hz
       [  118.622084] lkss-st7789 spi0.0: display init failed: -95
       [  118.627408] lkss-st7789 spi0.0: probe with driver lkss-st7789 failed with error -95
 
@@ -1331,7 +1420,7 @@ Exercise 4 – TODO Ex-4: Low-level SPI Primitives
 
 **Reference**: :ref:`Theory Part 5.1 – Low-level SPI Primitives <st7789-part5-1>`.
 
-Open ``lkss_st7789.c`` and find the ``TODO Ex-4.1`` and ``TODO Ex-4.2`` markers.  Implement:
+Open ``lkss_st7789.c`` and find ``TODO Ex-4.1`` and ``TODO Ex-4.2``.  Implement:
 
 - ``st7789_write_cmd()``: drive DCX low, then call ``spi_write()`` for 1 byte.
 - ``st7789_write_data()``: drive DCX high, then call ``spi_write()`` for ``len`` bytes.
@@ -1342,28 +1431,6 @@ change it.
 **Test**: Rebuild and reload.  ``dmesg`` should now advance past write_cmd/write_data
 and fail at a later stage (TODO Ex-5 or TODO Ex-6).
 
-**Questions:**
-
-1. What would happen if DCX toggled in the middle of a multi-byte SPI transfer?
-2. ``spi_write()`` is synchronous — it blocks until the transfer completes.
-   When would you use ``spi_async()`` instead?
-
-.. admonition:: Reference Answers
-
-   **1.** The ST7789 samples the DCX line at the start of each byte.  If DCX
-   changes during a transfer, bytes before the toggle are interpreted with the
-   original meaning (command or data) and bytes after with the opposite meaning.
-   For example, if DCX goes HIGH mid-way through a command byte, the controller
-   would treat the remaining bits as data parameters, garbling the command.
-   In practice, ``gpiod_set_value()`` is called *before* ``spi_write()``, and
-   ``spi_write()`` is blocking — the GPIO level is stable for the entire transfer.
-
-   **2.** ``spi_async()`` is used when: (a) you cannot sleep (e.g. interrupt context
-   or a real-time path), (b) you want to pipeline multiple transfers and be
-   notified via a completion callback, or (c) you need DMA-backed non-blocking
-   transfers for high-throughput cases.  For a probe-time display driver on a slow
-   SPI bus, ``spi_write()`` is simpler and perfectly correct.
-
 ----
 
 Exercise 5 – TODO Ex-5: Hardware Reset
@@ -1371,34 +1438,17 @@ Exercise 5 – TODO Ex-5: Hardware Reset
 
 **Reference**: :ref:`Theory Part 5.2 – Hardware Reset <st7789-part5-2>`.
 
-Implement ``st7789_hw_reset()``:
+Open ``lkss_st7789.c`` and find ``TODO Ex-5``,  implement ``st7789_hw_reset()``:
 
 1. Write logical 1 to the reset GPIO (asserts the active-low RESX pin LOW).
 2. Sleep 20 ms (≥ 15 ms minimum from the datasheet).
 3. Write logical 0 (deasserts RESX to HIGH).
 4. Sleep 150 ms (≥ 120 ms minimum before the first command).
 
-**Test**: If you have an oscilloscope, probe J601 pin 32.  On ``insmod`` you
+Uncomment ``st7789_hw_reset()`` call from ``st7789_probe``.
+
+**Test**: If you have an oscilloscope, probe J601 pin 32.  On ``modprobe`` you
 should see a ~20 ms LOW pulse followed by the line going HIGH.
-
-**Questions:**
-
-1. Why does ``gpiod_set_value(priv->reset, 1)`` drive the pin **LOW**?
-   What role does ``GPIO_ACTIVE_LOW`` in the device tree play?
-
-.. admonition:: Reference Answers
-
-   **1.** The ``gpiod`` API works with *logical* values, not physical pin levels.
-   Logical 1 means "asserted" (active state).  In the device tree the GPIO is
-   declared with the ``GPIO_ACTIVE_LOW`` flag::
-
-      reset-gpios = <&gpio2 19 GPIO_ACTIVE_LOW>;
-
-   The kernel GPIO subsystem inverts the physical level for active-low GPIOs:
-   logical 1 → physical LOW; logical 0 → physical HIGH.  This means the driver
-   code reads naturally ("assert reset = 1, deassert = 0") without having to
-   know the physical polarity.  If the hardware were changed to an active-high
-   reset, only the DT flag would change, not the driver code.
 
 ----
 
@@ -1423,32 +1473,12 @@ sequence** — the display will turn on and show something:
    st7789_write_cmd(priv, ST7789_DISPON);    /* display on; wait 100ms */
    msleep(100);
 
-For correct colors and contrast, the solution adds power/VCOM/gamma registers
-matching the ``HSD20_IPS`` profile from ``drivers/staging/fbtft/fb_st7789v.c``.
-Consult ``lkss_st7789_sol.c`` for the full sequence after your basic version works.
+For correct colors and contrast, look at the complete initialization implemenation
+in ``st7789_init_display()`` in section
+:ref:`Theory Part 3 – The ST7789 Display Controller <st7789-part3>`.
 
-**Test**: After ``insmod``, the display should turn on.  If TODO Ex-7.2 (fill) is not
+**Test**: After ``modprobe``, the display should turn on.  If TODO Ex-7.2 (fill) is not
 yet implemented the screen may show garbage or be white — that is normal.
-
-**Questions:**
-
-1. What would the display look like without ``INVON``?  Try removing it.
-2. What does ``COLMOD 0x55`` configure?  What value would you use for 18 bpp?
-
-.. admonition:: Reference Answers
-
-   **1.** Without ``INVON``, all colors appear as their RGB complement: red shows
-   as cyan, white shows as black, green shows as magenta, etc.  Most ST7789 IPS
-   modules are manufactured with the liquid crystal layer oriented in the
-   inverted sense, so ``INVON`` is required to display natural colors.  Removing
-   it and running the red/green/blue fill test will show cyan/magenta/yellow
-   instead — a reliable way to verify the command is working.
-
-   **2.** ``COLMOD`` sets the pixel format for both the MCU interface (how SPI
-   data is packed) and the RGB interface (unused).  The value ``0x55`` encodes
-   ``0x5`` in each nibble: high nibble = RGB interface 16 bpp, low nibble = MCU
-   interface 16 bpp (RGB565, 2 bytes per pixel).  For 18 bpp (RGB666) you would
-   use ``0x66``.
 
 ----
 
@@ -1457,11 +1487,11 @@ Exercise 7 – TODO Ex-7: Address Window and Fill
 
 **Reference**: :ref:`Theory Part 5.3 – Address Window <st7789-part5-3>` and :ref:`Part 5.4 – Full-screen Fill <st7789-part5-4>`.
 
-Implement both functions (``TODO Ex-7.1`` and ``TODO Ex-7.2``):
+Implement the following functions:
 
-1. ``st7789_set_addr_win()``: build the 4-byte big-endian arrays for CASET and
+1. ``TODO Ex-7.1``: ``st7789_set_addr_win()``: build the 4-byte big-endian arrays for CASET and
    RASET, send CASET + data, RASET + data, then RAMWR.
-2. ``st7789_fill()``: call ``set_addr_win`` for the full panel, allocate a
+2. ``TODO Ex-7.2``:  ``st7789_fill()``: call ``set_addr_win`` for the full panel, allocate a
    scanline buffer with ``kmalloc``, fill it with the repeated color, loop
    sending it ``height`` times, then ``kfree`` the buffer.
 
@@ -1474,30 +1504,6 @@ Implement both functions (``TODO Ex-7.1`` and ``TODO Ex-7.2``):
     st7789_fill(priv, 0x001F);   /* solid blue  */
 
 The display should flash red, green, blue in sequence.
-
-**Questions:**
-
-1. What would happen if you sent the CASET bytes in little-endian order?
-2. Why allocate one scanline buffer and loop, rather than one pixel at a time?
-   How many SPI transactions does each approach use for a full-screen fill?
-
-.. admonition:: Reference Answers
-
-   **1.** The CASET parameter encodes two 16-bit values (x0 and x1) in big-endian
-   byte order.  If sent little-endian, e.g. for x1=239 (0x00EF) the bytes
-   ``{0xEF, 0x00}`` would be interpreted as 0xEF00 = 61184 — far outside the
-   240-pixel panel.  The controller would either clip to its internal maximum or
-   accept an out-of-range window, but in either case no correct pixel data would
-   reach the display (the window would be empty or mispositioned) and the screen
-   would stay blank or show garbage.
-
-   **2.** Each ``spi_write()`` call has a fixed setup cost (DMA descriptor,
-   interrupt, bus arbitration).  Sending one pixel at a time means 6 ``spi_write``
-   calls per pixel (CASET cmd + data + RASET cmd + data + RAMWR cmd + pixel data)
-   × 57,600 pixels = **345,600 calls** for a full screen.  With one scanline
-   buffer: ``set_addr_win`` (3 calls) + 240 row writes = **243 calls** — roughly
-   1,400× fewer SPI transactions, which translates directly to a much shorter
-   fill time.
 
 ----
 
@@ -1520,23 +1526,6 @@ Implement ``st7789_fill_rect()``.  Key points:
     st7789_fill_rect(priv,   0,   0,   4, 240, 0xF800);  /* left   */
     st7789_fill_rect(priv, 236,   0,   4, 240, 0xF800);  /* right  */
 
-**Questions:**
-
-1. What happens if you skip the coordinate clamping and the caller passes
-   ``x=230, w=20`` on a 240-pixel-wide panel?
-
-.. admonition:: Reference Answers
-
-   **1.** Without clamping, ``x + w - 1 = 249``.  The CASET command sends x1=249
-   as the column end.  The ST7789 clips its internal window to the physical panel
-   boundary (239), so in practice only columns 230–239 (10 pixels) are drawn
-   instead of 20.  The row buffer is still ``w*2 = 40`` bytes wide, so you are
-   sending 20 columns worth of data for a 10-column window — the last 10 pixels
-   of each row are silently discarded by the controller.  Visually the rectangle
-   appears half the width the caller requested.  On a different controller the
-   behavior might be a hard error or undefined; clamping is necessary for correct
-   and portable behavior.
-
 ----
 
 Exercise 9 – TODO Ex-9: Single Pixel
@@ -1555,29 +1544,6 @@ Implement ``st7789_draw_pixel()``:
     for (int row = 0; row < 24; row++)
         for (int col = 0; col < 24; col++)
             st7789_draw_pixel(priv, col*10, row*10, 0xFFFF);
-
-**Questions:**
-
-1. Each ``draw_pixel()`` call issues how many SPI transactions?
-   (Hint: count the calls to ``spi_write()`` inside one ``draw_pixel()``.)
-2. Drawing 57,600 pixels one at a time: how many SPI transactions total?
-   Why is ``st7789_fill()`` so much more efficient?
-
-.. admonition:: Reference Answers
-
-   **1.** One ``draw_pixel()`` call: ``set_addr_win()`` issues 5 ``spi_write()``
-   calls (CASET cmd, CASET data, RASET cmd, RASET data, RAMWR cmd), plus 1
-   ``spi_write()`` for the 2-byte pixel data = **6 ``spi_write()`` calls per
-   pixel**.
-
-   **2.** 57,600 pixels × 6 = **345,600 ``spi_write()`` calls**.
-   ``st7789_fill()`` uses a single ``set_addr_win()`` (3 calls) covering the
-   entire panel, then 240 row writes = **243 calls** total — about 1,400×
-   fewer.  The efficiency gain comes from re-using one address window for all
-   pixels: the controller auto-advances its write pointer after each pixel, so
-   no per-pixel addressing overhead is needed.
-
-----
 
 Exercise 10 – TODO Ex-10: Line Drawing
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
