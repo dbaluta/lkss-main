@@ -1,5 +1,7 @@
+.. _day3:
 .. _day3_bis:
 .. _spi-lab-st7789:
+.. _spi-and-the-st7789-display-driver:
 
 Day 3 (alternate) – SPI from Scratch: Driving the ST7789 Display
 =================================================================
@@ -1225,7 +1227,7 @@ Lab Exercises – Kernel Driver
 
    **Setup before starting:**
 
-   - Skeleton: ``drivers/lkss/labs/lab3/lkss_st7789.c``  (TODOs 1–13)
+   - Skeleton: ``drivers/lkss/labs/lab3/lkss_st7789.c``  (TODO Ex-2 through Ex-5, bonus)
    - Solution: ``drivers/lkss/labs/lab3/lkss_st7789_sol.c``
    - Wire the display as described in :ref:`Part 6 <st7789-part6>` before loading the driver.
    - Build command::
@@ -1272,93 +1274,64 @@ bind the driver.
 
 2. Add the ``&lpspi4`` and ``&iomuxc`` ``pinctrl_lpspi4_st7789`` nodes from :ref:`Part 7 <st7789-part7>`.
 
-3. Recompile and boot
+3. Recompile and boot::
+
       $ ./scripts/lkss.py compile
-      $ python3 scripts/lkss.py boot
+      $ ./scripts/lkss.py boot
 
 4. On the board, verify the SPI device appeared::
 
       ls /sys/bus/spi/devices/
 
    You should see an entry like ``spi0.0``.  The bus number is assigned by the
-   kernel in probe order — **not** by the LPSPI hardware number.  Without a
-   ``spi4 = &lpspi4`` alias in the DTS, LPSPI4 gets the next free number;
-   typically ``0`` when it is the only active SPI controller.
+   kernel in probe order, **not** by the LPSPI controller number.
 
-5. Inspect the compatible string at runtime (replace ``0`` with the actual bus number)::
+5. Inspect the compatible string at runtime::
 
       cat /sys/bus/spi/devices/spi0.0/of_node/compatible
       # Expected: lkss,st7789
 
 ----
 
-Exercise 3 – Build and Load the Driver Skeleton
+Exercise 3 – Build and Load the driver skeleton
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Objective**: Compile and load the skeleton.  Understand how the SPI core calls
-``probe()``.
+**Objective**: Compile and load the skeleton.  Check that lkss_st7789.c ``probe()`` function is called.
 
 1. Enable the driver::
 
-      make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- menuconfig
-      # Device Drivers → LKSS Labs → Lab 3: ST7789 SPI display
+      ./scripts/lkss.py menuconfig
+      # select M to compile the st7789.c driver as a module
+      # Device Drivers -> Linux Kernel Summer School Drivers -> LKSS Lab 3 drivers -> ST7789 SPI display
 
-2. Build::
+2. Build and install st7789.c driver::
 
-      make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-           M=drivers/lkss/labs/lab3 -j$(nproc)
+      ./scripts/lkss.py compile --install-modules
 
-3. Copy to board and load::
+3. Load the driver::
 
-      insmod /tmp/lkss_st7789.ko
-      dmesg | grep -i st7789
+      modprobe lkss_st7789.ko
+      dmesg | grep -i lkss_st7789
 
-4. Expected output — ``probe()`` is called but returns immediately because
-   ``TODO 3`` (init_display) returns ``-EOPNOTSUPP``::
+4. Expected output, ``probe()`` is called but returns immediately because
+   ``TODO Ex-3`` (init_display) returns ``-EOPNOTSUPP``::
 
       [  xx.xx] spi0.0: ST7789 probe: speed=62500000 Hz mode=0x00
-      [  xx.xx] spi0.0: display init failed: -95
+      [  118.615213] lkss-st7789 spi0.0: ST7789 probe: speed=62500000 Hz mode=0x00
+      [  118.622084] lkss-st7789 spi0.0: display init failed: -95
+      [  118.627408] lkss-st7789 spi0.0: probe with driver lkss-st7789 failed with error -95
 
    This is **expected** — the skeleton stubs return ``-EOPNOTSUPP`` (-95) until
    you implement each TODO.
 
-**Questions:**
-
-1. Which SPI core function calls your ``probe()``?  Look at ``/proc/kallsyms``
-   or the kernel source in ``drivers/spi/spi.c``.
-2. What does ``module_spi_driver()`` expand to?
-
-.. admonition:: Reference Answers
-
-   **1.** The call chain is: ``spi_register_driver()`` → device/driver core matching
-   → ``spi_drv_probe()`` in ``drivers/spi/spi.c`` → ``st7789_probe()``.
-   ``spi_drv_probe()`` is the generic SPI shim registered as ``.probe`` in the
-   ``device_driver`` struct; it unpacks the ``spi_device`` and calls the driver's
-   own ``probe`` function pointer.
-
-   **2.** ``module_spi_driver(drv)`` is a macro that expands to:
-
-   .. code-block:: c
-
-      static int __init drv##_init(void)
-      { return spi_register_driver(&drv); }
-      module_init(drv##_init);
-
-      static void __exit drv##_exit(void)
-      { spi_unregister_driver(&drv); }
-      module_exit(drv##_exit);
-
-   It eliminates the boilerplate ``module_init``/``module_exit`` pair that every
-   SPI driver would otherwise have to write identically.
-
 ----
 
-Exercise 4 – TODO 1: Low-level SPI Primitives
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Exercise 4 – TODO Ex-2: Low-level SPI Primitives
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Reference**: :ref:`Theory Part 5.1 – Low-level SPI Primitives <st7789-part5-1>`.
 
-Open ``lkss_st7789.c`` and find the ``TODO 1`` comment blocks.  Implement:
+Open ``lkss_st7789.c`` and find the ``TODO Ex-2`` markers.  Implement:
 
 - ``st7789_write_cmd()``: drive DCX low, then call ``spi_write()`` for 1 byte.
 - ``st7789_write_data()``: drive DCX high, then call ``spi_write()`` for ``len`` bytes.
@@ -1367,7 +1340,7 @@ Open ``lkss_st7789.c`` and find the ``TODO 1`` comment blocks.  Implement:
 change it.
 
 **Test**: Rebuild and reload.  ``dmesg`` should now advance past write_cmd/write_data
-and fail at a later stage (TODO 2 or TODO 3).
+and fail at a later stage (TODO Ex-2 or TODO Ex-3).
 
 **Questions:**
 
@@ -1393,8 +1366,8 @@ and fail at a later stage (TODO 2 or TODO 3).
 
 ----
 
-Exercise 5 – TODO 2: Hardware Reset
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Exercise 5 – TODO Ex-2: Hardware Reset
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Reference**: :ref:`Theory Part 5.2 – Hardware Reset <st7789-part5-2>`.
 
@@ -1429,8 +1402,8 @@ should see a ~20 ms LOW pulse followed by the line going HIGH.
 
 ----
 
-Exercise 6 – TODO 3: Initialization Sequence
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Exercise 6 – TODO Ex-3: Initialization Sequence
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Reference**: :ref:`Theory Part 3 – The ST7789 Display Controller <st7789-part3>`, Essential Commands table.
 
@@ -1454,7 +1427,7 @@ For correct colors and contrast, the solution adds power/VCOM/gamma registers
 matching the ``HSD20_IPS`` profile from ``drivers/staging/fbtft/fb_st7789v.c``.
 Consult ``lkss_st7789_sol.c`` for the full sequence after your basic version works.
 
-**Test**: After ``insmod``, the display should turn on.  If TODO 4 (fill) is not
+**Test**: After ``insmod``, the display should turn on.  If TODO Ex-3 (fill) is not
 yet implemented the screen may show garbage or be white — that is normal.
 
 **Questions:**
@@ -1479,12 +1452,12 @@ yet implemented the screen may show garbage or be white — that is normal.
 
 ----
 
-Exercise 7 – TODO 4: Address Window and Fill
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Exercise 7 – TODO Ex-3: Address Window and Fill
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Reference**: :ref:`Theory Part 5.3 – Address Window <st7789-part5-3>` and :ref:`Part 5.4 – Full-screen Fill <st7789-part5-4>`.
 
-Implement both functions in the ``TODO 4`` block:
+Implement both functions in the ``TODO Ex-3`` block:
 
 1. ``st7789_set_addr_win()``: build the 4-byte big-endian arrays for CASET and
    RASET, send CASET + data, RASET + data, then RAMWR.
@@ -1528,8 +1501,8 @@ The display should flash red, green, blue in sequence.
 
 ----
 
-Exercise 8 – TODO 5: Filled Rectangle
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Exercise 8 – TODO Ex-4: Filled Rectangle
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Reference**: :ref:`Theory Part 5.6 – Filled Rectangle <st7789-part5-6>`.
 
@@ -1566,8 +1539,8 @@ Implement ``st7789_fill_rect()``.  Key points:
 
 ----
 
-Exercise 9 – TODO 6: Single Pixel
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Exercise 9 – TODO Ex-5: Single Pixel
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Reference**: :ref:`Theory Part 5.5 – Single Pixel <st7789-part5-5>`.
 
@@ -1606,8 +1579,8 @@ Implement ``st7789_draw_pixel()``:
 
 ----
 
-Exercise 10 – TODO 7: Line Drawing
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Exercise 10 – TODO Ex-5: Line Drawing
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Reference**: :ref:`Theory Part 5.7 – Line Drawing (Bresenham) <st7789-part5-7>`.
 
@@ -1659,8 +1632,8 @@ Then add horizontal and vertical lines::
 
 ----
 
-Exercise 11 – TODO 8: Circle Outline
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Exercise 11 – TODO Ex-5: Circle Outline
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Reference**: :ref:`Theory Part 5.8 – Circle Outline (midpoint algorithm) <st7789-part5-8>`.
 
@@ -1702,14 +1675,14 @@ with ``x=0, y=r, d=1-r`` and loop while ``x <= y``.
 
 ----
 
-Exercise 12 – TODO 9: Filled Circle
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Exercise 12 – Given: Filled Circle
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Reference**: :ref:`Theory Part 5.9 – Filled Circle (chord fill) <st7789-part5-9>`.
 
-Implement ``st7789_fill_circle()``.  Iterate ``dy`` from ``-r`` to ``+r``.
-For each ``dy`` compute ``dx = int_sqrt(r*r - dy*dy)`` and call
-``st7789_fill_rect(cx - dx, cy + dy, 2*dx + 1, 1, color)``.
+``st7789_fill_circle()`` is **provided** in the skeleton — no implementation needed.
+Study the code: it iterates ``dy`` from ``-r`` to ``+r``; for each row it computes
+``dx = int_sqrt(r*r - dy*dy)`` and calls ``fill_rect`` for the horizontal chord.
 
 **Test**: Overlay a filled circle with its outline in a contrasting color::
 
@@ -1742,7 +1715,7 @@ The white outline should sit exactly on the boundary of the green fill.
 
 ----
 
-Exercise 13 – TODO 10: Demo Pattern
+Exercise 13 – TODO Ex-5: Demo Pattern
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Objective**: Tie all primitives together in a composite test image that visually
@@ -1750,15 +1723,25 @@ confirms every function works.
 
 Implement ``st7789_demo()`` with these steps in order:
 
-1. ``st7789_fill(priv, 0x0000)`` — black background; pause 500 ms.
-2. Four ``st7789_fill_rect()`` calls — 4-pixel red border on all four sides.
-3. ``st7789_fill_circle(priv, 60, 60, 50, 0x07E0)`` — green filled circle.
-4. ``st7789_fill_rect(priv, 130, 130, 100, 100, 0x001F)`` — blue square.
-5. ``st7789_draw_line(priv, 5, 5, 234, 234, 0xFFFF)`` — white diagonal.
-6. ``st7789_draw_circle(priv, 120, 120, 40, 0xFFE0)`` — yellow circle outline.
+1. Full-screen solid color cycle: call ``st7789_fill()`` for red (``0xF800``),
+   green (``0x07E0``), blue (``0x001F``), white (``0xFFFF``), pausing 1 s
+   between each.
 
-**Test**: ``insmod`` the module.  The display should show the complete test pattern.
-If any primitive is broken, the pattern will show clearly which one.
+2. ``st7789_fill(priv, 0x0000)`` — black background.
+
+3. ``st7789_fill_rect(priv, 0, 0, 80, 80, 0x001F)`` — blue filled rectangle,
+   top-left corner.
+
+4. Four ``st7789_fill_rect()`` calls — 8-pixel yellow (``0xFFE0``) border on
+   all four sides.
+
+5. ``st7789_draw_line(priv, 0, 0, 239, 239, 0xFFFF)`` — white diagonal.
+
+6. ``st7789_draw_circle(priv, 120, 120, 80, 0xFFFF)`` — white circle at center.
+
+**Test**: ``insmod`` the module.  The display should cycle through red, green,
+blue, and white (1 s each), then settle on a black screen with a blue square in
+the top-left, a yellow border, a white diagonal, and a white circle.
 
 **This completes the kernel driver exercises.**
 
@@ -1772,7 +1755,7 @@ Lab Exercises – Userspace Interface
    **Prerequisites**: Exercises 1–13 complete (working kernel driver with all
    drawing primitives).
 
-   The solution driver ``lkss_st7789_sol.c`` already implements TODOs 11–13.
+   The solution driver ``lkss_st7789_sol.c`` already implements ``TODO bonus``.
    You can use the solution module while working on userspace exercises, then
    add the miscdevice to your own driver afterwards.
 
@@ -1783,13 +1766,13 @@ Lab Exercises – Userspace Interface
 
 ----
 
-Exercise 14 – TODO 11: Add Miscdevice Fields to the Driver
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Exercise 14 – TODO bonus: Add Miscdevice Fields to the Driver
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Objective**: Extend the driver private state to hold the framebuffer and
 miscdevice.  No functional change yet — just structure preparation.
 
-Open ``lkss_st7789.c`` and find ``TODO 11``.
+Open ``lkss_st7789.c`` and find ``TODO bonus``.
 
 1. Add the following includes at the top of the file:
 
@@ -1823,12 +1806,12 @@ Open ``lkss_st7789.c`` and find ``TODO 11``.
 
 ----
 
-Exercise 15 – TODO 12: Implement File Operations
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Exercise 15 – TODO bonus: Implement File Operations
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Objective**: Implement the kernel-side file operations that userspace will call.
 
-Find ``TODO 12`` in the skeleton.  Implement the following four functions:
+Find ``TODO bonus`` in the skeleton.  Implement the following four functions:
 
 **st7789_fb_open** — minimal, just returns 0::
 
@@ -1877,13 +1860,13 @@ Also implement ``st7789_flush()`` from :ref:`Theory Part 5.10 – Userspace Flus
 
 ----
 
-Exercise 16 – TODO 13: Probe Registration and Remove Cleanup
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Exercise 16 – TODO bonus: Probe Registration and Remove Cleanup
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Objective**: Allocate the framebuffer, register the miscdevice in ``probe()``,
 and clean up in ``remove()``.
 
-Find ``TODO 13`` in ``st7789_probe()``.  After the ``st7789_demo()`` call add:
+Find ``TODO bonus`` in ``st7789_probe()``.  After the ``st7789_demo()`` call add:
 
 .. code-block:: c
 

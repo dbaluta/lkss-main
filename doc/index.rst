@@ -71,7 +71,6 @@ students to try to fix the issues themselves by submitting a pull request.
    2026/about
    2026/day1
    2026/day2
-   2026/day3
    2026/day3_bis
    2026/day3_human
    2026/day4
