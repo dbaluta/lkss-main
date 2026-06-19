@@ -1227,7 +1227,7 @@ Lab Exercises – Kernel Driver
 
    **Setup before starting:**
 
-   - Skeleton: ``drivers/lkss/labs/lab3/lkss_st7789.c``  (TODO Ex-2 through Ex-5, bonus)
+   - Skeleton: ``drivers/lkss/labs/lab3/lkss_st7789.c``  (TODO Ex-4–Ex-13, Ex-14–Ex-16)
    - Solution: ``drivers/lkss/labs/lab3/lkss_st7789_sol.c``
    - Wire the display as described in :ref:`Part 6 <st7789-part6>` before loading the driver.
    - Build command::
@@ -1314,7 +1314,7 @@ Exercise 3 – Build and Load the driver skeleton
       dmesg | grep -i lkss_st7789
 
 4. Expected output, ``probe()`` is called but returns immediately because
-   ``TODO Ex-3`` (init_display) returns ``-EOPNOTSUPP``::
+   ``TODO Ex-6`` (init_display) returns ``-EOPNOTSUPP``::
 
       [  xx.xx] spi0.0: ST7789 probe: speed=62500000 Hz mode=0x00
       [  118.615213] lkss-st7789 spi0.0: ST7789 probe: speed=62500000 Hz mode=0x00
@@ -1326,12 +1326,12 @@ Exercise 3 – Build and Load the driver skeleton
 
 ----
 
-Exercise 4 – TODO Ex-2: Low-level SPI Primitives
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Exercise 4 – TODO Ex-4: Low-level SPI Primitives
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Reference**: :ref:`Theory Part 5.1 – Low-level SPI Primitives <st7789-part5-1>`.
 
-Open ``lkss_st7789.c`` and find the ``TODO Ex-2`` markers.  Implement:
+Open ``lkss_st7789.c`` and find the ``TODO Ex-4.1`` and ``TODO Ex-4.2`` markers.  Implement:
 
 - ``st7789_write_cmd()``: drive DCX low, then call ``spi_write()`` for 1 byte.
 - ``st7789_write_data()``: drive DCX high, then call ``spi_write()`` for ``len`` bytes.
@@ -1340,7 +1340,7 @@ Open ``lkss_st7789.c`` and find the ``TODO Ex-2`` markers.  Implement:
 change it.
 
 **Test**: Rebuild and reload.  ``dmesg`` should now advance past write_cmd/write_data
-and fail at a later stage (TODO Ex-2 or TODO Ex-3).
+and fail at a later stage (TODO Ex-5 or TODO Ex-6).
 
 **Questions:**
 
@@ -1366,7 +1366,7 @@ and fail at a later stage (TODO Ex-2 or TODO Ex-3).
 
 ----
 
-Exercise 5 – TODO Ex-2: Hardware Reset
+Exercise 5 – TODO Ex-5: Hardware Reset
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Reference**: :ref:`Theory Part 5.2 – Hardware Reset <st7789-part5-2>`.
@@ -1402,8 +1402,8 @@ should see a ~20 ms LOW pulse followed by the line going HIGH.
 
 ----
 
-Exercise 6 – TODO Ex-3: Initialization Sequence
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Exercise 6 – TODO Ex-6: Initialization Sequence
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Reference**: :ref:`Theory Part 3 – The ST7789 Display Controller <st7789-part3>`, Essential Commands table.
 
@@ -1427,7 +1427,7 @@ For correct colors and contrast, the solution adds power/VCOM/gamma registers
 matching the ``HSD20_IPS`` profile from ``drivers/staging/fbtft/fb_st7789v.c``.
 Consult ``lkss_st7789_sol.c`` for the full sequence after your basic version works.
 
-**Test**: After ``insmod``, the display should turn on.  If TODO Ex-3 (fill) is not
+**Test**: After ``insmod``, the display should turn on.  If TODO Ex-7.2 (fill) is not
 yet implemented the screen may show garbage or be white — that is normal.
 
 **Questions:**
@@ -1452,12 +1452,12 @@ yet implemented the screen may show garbage or be white — that is normal.
 
 ----
 
-Exercise 7 – TODO Ex-3: Address Window and Fill
+Exercise 7 – TODO Ex-7: Address Window and Fill
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Reference**: :ref:`Theory Part 5.3 – Address Window <st7789-part5-3>` and :ref:`Part 5.4 – Full-screen Fill <st7789-part5-4>`.
 
-Implement both functions in the ``TODO Ex-3`` block:
+Implement both functions (``TODO Ex-7.1`` and ``TODO Ex-7.2``):
 
 1. ``st7789_set_addr_win()``: build the 4-byte big-endian arrays for CASET and
    RASET, send CASET + data, RASET + data, then RAMWR.
@@ -1501,8 +1501,8 @@ The display should flash red, green, blue in sequence.
 
 ----
 
-Exercise 8 – TODO Ex-4: Filled Rectangle
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Exercise 8 – TODO Ex-8: Filled Rectangle
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Reference**: :ref:`Theory Part 5.6 – Filled Rectangle <st7789-part5-6>`.
 
@@ -1539,8 +1539,8 @@ Implement ``st7789_fill_rect()``.  Key points:
 
 ----
 
-Exercise 9 – TODO Ex-5: Single Pixel
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Exercise 9 – TODO Ex-9: Single Pixel
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Reference**: :ref:`Theory Part 5.5 – Single Pixel <st7789-part5-5>`.
 
@@ -1579,7 +1579,7 @@ Implement ``st7789_draw_pixel()``:
 
 ----
 
-Exercise 10 – TODO Ex-5: Line Drawing
+Exercise 10 – TODO Ex-10: Line Drawing
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Reference**: :ref:`Theory Part 5.7 – Line Drawing (Bresenham) <st7789-part5-7>`.
@@ -1632,7 +1632,7 @@ Then add horizontal and vertical lines::
 
 ----
 
-Exercise 11 – TODO Ex-5: Circle Outline
+Exercise 11 – TODO Ex-11: Circle Outline
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Reference**: :ref:`Theory Part 5.8 – Circle Outline (midpoint algorithm) <st7789-part5-8>`.
@@ -1715,7 +1715,7 @@ The white outline should sit exactly on the boundary of the green fill.
 
 ----
 
-Exercise 13 – TODO Ex-5: Demo Pattern
+Exercise 13 – TODO Ex-13: Demo Pattern
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Objective**: Tie all primitives together in a composite test image that visually
@@ -1755,7 +1755,7 @@ Lab Exercises – Userspace Interface
    **Prerequisites**: Exercises 1–13 complete (working kernel driver with all
    drawing primitives).
 
-   The solution driver ``lkss_st7789_sol.c`` already implements ``TODO bonus``.
+   The solution driver ``lkss_st7789_sol.c`` already implements TODO Ex-14–Ex-16.
    You can use the solution module while working on userspace exercises, then
    add the miscdevice to your own driver afterwards.
 
@@ -1766,13 +1766,13 @@ Lab Exercises – Userspace Interface
 
 ----
 
-Exercise 14 – TODO bonus: Add Miscdevice Fields to the Driver
+Exercise 14 – TODO Ex-14: Add Miscdevice Fields to the Driver
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Objective**: Extend the driver private state to hold the framebuffer and
 miscdevice.  No functional change yet — just structure preparation.
 
-Open ``lkss_st7789.c`` and find ``TODO bonus``.
+Open ``lkss_st7789.c`` and find ``TODO Ex-14``.
 
 1. Add the following includes at the top of the file:
 
@@ -1806,12 +1806,12 @@ Open ``lkss_st7789.c`` and find ``TODO bonus``.
 
 ----
 
-Exercise 15 – TODO bonus: Implement File Operations
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Exercise 15 – TODO Ex-15: Implement File Operations
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Objective**: Implement the kernel-side file operations that userspace will call.
 
-Find ``TODO bonus`` in the skeleton.  Implement the following four functions:
+Find ``TODO Ex-15.1``–``Ex-15.4`` in the skeleton.  Implement the following four functions:
 
 **st7789_fb_open** — minimal, just returns 0::
 
@@ -1860,13 +1860,13 @@ Also implement ``st7789_flush()`` from :ref:`Theory Part 5.10 – Userspace Flus
 
 ----
 
-Exercise 16 – TODO bonus: Probe Registration and Remove Cleanup
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Exercise 16 – TODO Ex-16: Probe Registration and Remove Cleanup
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Objective**: Allocate the framebuffer, register the miscdevice in ``probe()``,
 and clean up in ``remove()``.
 
-Find ``TODO bonus`` in ``st7789_probe()``.  After the ``st7789_demo()`` call add:
+Find ``TODO Ex-16`` in ``st7789_probe()``.  After the ``st7789_demo()`` call add:
 
 .. code-block:: c
 
