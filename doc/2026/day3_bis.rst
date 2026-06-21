@@ -1401,7 +1401,7 @@ Exercise 3 – Build and Load the driver skeleton
 3. Load the driver::
 
       modprobe lkss_st7789.ko
-      dmesg | grep -i lkss_st7789
+      dmesg | grep -i lkss-st7789
 
 4. Expected output, ``probe()`` is called but returns immediately because
    ``TODO Ex-6`` (init_display) returns ``-EOPNOTSUPP``::
@@ -1410,7 +1410,7 @@ Exercise 3 – Build and Load the driver skeleton
       [  118.622084] lkss-st7789 spi0.0: display init failed: -95
       [  118.627408] lkss-st7789 spi0.0: probe with driver lkss-st7789 failed with error -95
 
-   This is **expected** — the skeleton stubs return ``-EOPNOTSUPP`` (-95) until
+   This is **expected**, the skeleton stubs return ``-EOPNOTSUPP`` (-95) until
    you implement each TODO.
 
 ----
@@ -1441,14 +1441,11 @@ Exercise 5 – TODO Ex-5: Hardware Reset
 Open ``lkss_st7789.c`` and find ``TODO Ex-5``,  implement ``st7789_hw_reset()``:
 
 1. Write logical 1 to the reset GPIO (asserts the active-low RESX pin LOW).
-2. Sleep 20 ms (≥ 15 ms minimum from the datasheet).
+2. Sleep 20 ms (> 15 ms minimum from the datasheet).
 3. Write logical 0 (deasserts RESX to HIGH).
-4. Sleep 150 ms (≥ 120 ms minimum before the first command).
+4. Sleep 150 ms (> 120 ms minimum before the first command).
 
 Uncomment ``st7789_hw_reset()`` call from ``st7789_probe``.
-
-**Test**: If you have an oscilloscope, probe J601 pin 32.  On ``modprobe`` you
-should see a ~20 ms LOW pulse followed by the line going HIGH.
 
 ----
 
@@ -1458,7 +1455,7 @@ Exercise 6 – TODO Ex-6: Initialization Sequence
 **Reference**: :ref:`Theory Part 3 – The ST7789 Display Controller <st7789-part3>`, Essential Commands table.
 
 Implement ``st7789_init_display()``.  You can start with the **minimal 6-command
-sequence** — the display will turn on and show something:
+sequence**, the display will turn on and show something:
 
 .. code-block:: c
 
@@ -1564,38 +1561,6 @@ Then add horizontal and vertical lines::
     st7789_draw_line(priv, 0, 120, 239, 120, 0xF800);  /* horizontal */
     st7789_draw_line(priv, 120, 0, 120, 239, 0x001F);  /* vertical   */
 
-**Questions:**
-
-1. Manually trace the algorithm for the line from (0,0) to (3,2).
-   After the first two iterations, what are the values of ``err``, ``x0``, ``y0``?
-2. What is the geometric meaning of the variable ``e2``?
-
-.. admonition:: Reference Answers
-
-   **1.** Setup: ``dx=3, dy=-2, sx=1, sy=1, err = dx+dy = 1``.
-
-   .. code-block:: text
-
-      iter  action        x0  y0  err   e2   step-x?  step-y?
-      ----  ------        --  --  ---   --   -------  -------
-        1   plot (0,0)     0   0    1    2   yes→-1   yes→+2
-            after step:    1   1    2
-        2   plot (1,1)     1   1    2    4   yes→ 0   no
-            after step:    2   1    0
-
-   After two iterations: **err = 0, x0 = 2, y0 = 1**.
-
-   The remaining iterations plot (2,1) and (3,2).  Full sequence:
-   (0,0) → (1,1) → (2,1) → (3,2).
-
-   **2.** ``e2 = 2 * err`` is the doubled error accumulator.  Geometrically
-   ``err`` tracks how far the current pixel path deviates from the ideal
-   mathematical line: negative means the raster path is below the line, positive
-   means above.  Doubling it before the two threshold comparisons (``dy`` and
-   ``dx``) lets both the x-step and y-step conditions be evaluated against the
-   *same* value of ``e2`` without modifying ``err`` between the checks —
-   avoiding the need for fractions while maintaining sub-pixel accuracy.
-
 ----
 
 Exercise 11 – TODO Ex-11: Circle Outline
@@ -1614,30 +1579,6 @@ with ``x=0, y=r, d=1-r`` and loop while ``x <= y``.
     st7789_draw_circle(priv, 120, 120, 60, 0x07E0);
     st7789_draw_circle(priv, 120, 120, 80, 0x07FF);
     st7789_draw_circle(priv, 120, 120, 100, 0xF81F);
-
-**Questions:**
-
-1. Why does the algorithm plot 8 points per iteration?
-   Which 8-fold symmetry of a circle does this exploit?
-2. What is the geometric meaning of the decision variable ``d``?
-
-.. admonition:: Reference Answers
-
-   **1.** A circle centered at (cx, cy) has 8-fold symmetry: it is invariant under
-   reflection about the horizontal axis (y → -y), vertical axis (x → -x), and
-   both diagonals (x ↔ y and x ↔ -y).  Computing one point (cx+x, cy+y) in the
-   first octant immediately gives seven others for free:
-   ``(cx±x, cy±y)`` and ``(cx±y, cy±x)``.  All 8 are plotted every iteration,
-   so the algorithm only needs to march through one eighth of the circle (the
-   octant where x goes from 0 to r/√2) while the whole circumference is rendered.
-
-   **2.** ``d`` is the value of the *implicit circle equation* ``f(x,y) = x² + y² - r²``
-   evaluated at the *midpoint* between the two candidate pixels for the next
-   step.  Initially ``d = 1 - r`` (midpoint between (1, r) and (1, r-1)).
-   If ``d < 0`` the midpoint is inside the circle (the upper pixel is closer to
-   the circle boundary → y stays); if ``d ≥ 0`` the midpoint is outside (the
-   lower pixel is closer → y decrements).  The integer update formulas maintain
-   this invariant without any floating-point arithmetic or square roots.
 
 ----
 
