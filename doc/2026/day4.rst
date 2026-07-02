@@ -574,11 +574,7 @@ Your first job is to enable the controller — *without* adding the sensor itsel
 
   .. code-block:: bash
 
-<<<<<<< HEAD
      python3 scripts/lkss.py compile --install-modules
-=======
-     python3 compile --install-modules
->>>>>>> 792d8e4 (doc: lab4: I2C Bus and the BMP280 Sensor Driver)
      python3 scripts/lkss.py boot
 
 - Confirm a **new** adapter appeared. LPI2C7 is at register base ``0x426d0000``; find
